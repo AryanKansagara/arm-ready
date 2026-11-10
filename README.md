@@ -2,7 +2,7 @@
 
 An arm64 migration readiness scanner for containerised services. Drop in Dockerfiles, Compose or Kubernetes manifests and dependency lockfiles; Arm Ready checks every base image, downloaded binary and package for linux/arm64 against live public registries, flags blockers with file and line, writes the multi-arch CI and node patches, and estimates the cost change of moving to Graviton.
 
-Live: https://arm-ready.vercel.app
+Live: https://arm-ready-gamma.vercel.app
 
 ## The pain
 

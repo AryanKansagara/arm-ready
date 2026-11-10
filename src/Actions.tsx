@@ -59,8 +59,10 @@ export default function Actions({ project: p, files }: { project: Project; files
             <legend className="small muted" style={{ marginBottom: '.4rem' }}>Workloads to move (blocked services are unticked by default)</legend>
             {kinds.map(k => <label key={k.name} className="row gap-sm small"><input type="checkbox" checked={chosen.has(k.name)} onChange={e => { const s = new Set(chosen); if (e.target.checked) s.add(k.name); else s.delete(k.name); setPick(s) }} />{k.name} <span className="muted">({k.kind}{blocked.has(k.name) ? ', blocked' : ''})</span></label>)}
           </fieldset>
+          {chosen.size === 0 ? <p className="muted small">Every workload still has a blocker. Tick one to generate its patch anyway (for example after fixing it in a branch), or clear the blockers and re-scan.</p> : <>
           {patches.map(f => <Code key={f.file} label={f.file} code={f.text} />)}
           <div><button type="button" className="btn outline sm" onClick={() => download(`${slug(p.name)}-arm64-patches.yaml`, patches.map(f => `# ${f.file}\n${f.text}`).join('---\n'), 'text/yaml')}>Download all patches</button></div>
+          </>}
         </>}
       </div>
 

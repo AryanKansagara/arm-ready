@@ -289,9 +289,10 @@ function Trend({ snaps }: { snaps: Snapshot[] }) {
 
 function History({ p }: { p: P }) {
   const snaps = [...p.snapshots].sort((a, b) => a.createdAt - b.createdAt)
-  const [a, setA] = useState(snaps[snaps.length - 2]?.id ?? '')
-  const [b, setB] = useState(snaps[snaps.length - 1]?.id ?? '')
-  const A = snaps.find(s => s.id === a), B = snaps.find(s => s.id === b)
+  const [a, setA] = useState('')
+  const [b, setB] = useState('')
+  // Default to the last two scans; follows new scans until the user picks.
+  const A = snaps.find(s => s.id === a) ?? snaps[snaps.length - 2], B = snaps.find(s => s.id === b) ?? snaps[snaps.length - 1]
   const del = async (s: Snapshot) => {
     const cur = getProject(p.id)!
     await saveProject({ ...cur, snapshots: cur.snapshots.filter(x => x.id !== s.id) })
@@ -312,7 +313,7 @@ function History({ p }: { p: P }) {
             <tr key={s.id}>
               <th scope="row">{s.label}</th><td>{new Date(s.createdAt).toLocaleString()}</td><td className="num">{s.score}</td>
               <td className="num">{s.services.reduce((n, x) => n + x.blockers, 0)}</td>
-              <td><div className="seg"><button type="button" aria-pressed={a === s.id} onClick={() => setA(s.id)}>Before</button><button type="button" aria-pressed={b === s.id} onClick={() => setB(s.id)}>After</button></div></td>
+              <td><div className="seg"><button type="button" aria-pressed={A?.id === s.id} onClick={() => setA(s.id)}>Before</button><button type="button" aria-pressed={B?.id === s.id} onClick={() => setB(s.id)}>After</button></div></td>
               <td><button type="button" className="btn danger-ghost sm" onClick={() => void del(s)}>Delete</button></td>
             </tr>))}
           </tbody>

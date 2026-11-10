@@ -19,7 +19,7 @@ export default function Workspace() {
   useEffect(() => {
     const q = new URLSearchParams(location.search)
     if (q.get('import') === '1') { history.replaceState({}, '', '/app'); setNaming(true) }
-    if (q.get('sample') === '1') void createSampleProject().then(p => go(`/app/p/${p.id}?scan=1`, { replace: true }))
+    if (q.get('sample') === '1') { const tab = q.get('tab'); void createSampleProject().then(p => go(`/app/p/${p.id}${tab && /^[a-z]+$/.test(tab) ? '/' + tab : ''}?scan=1`, { replace: true })) }
   }, [])
 
   const create = async (name: string) => {

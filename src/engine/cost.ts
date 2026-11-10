@@ -39,7 +39,7 @@ export function armTarget(type: string, gen: 'g3' | 'g4'): string | null {
   return `${fam}.${t.size}`
 }
 
-export interface CostLine extends InventoryRow { target: string | null; x86Hourly: number | null; armHourly: number | null; armCount: number; current: number; projected: number; delta: number; breakEven: number | null; note?: string }
+export interface CostLine extends Omit<InventoryRow, "target"> { target: string | null; x86Hourly: number | null; armHourly: number | null; armCount: number; current: number; projected: number; delta: number; breakEven: number | null; note?: string }
 
 /**
  * perf = Arm throughput relative to the current x86 instance for this workload (1.10 means each Arm instance does 10% more work).

@@ -262,3 +262,22 @@ worker,c6i.4xlarge,3,730
 billing,r5.xlarge,2,730
 reports-db,r6i.2xlarge,1,730
 `
+
+/** Two earlier synthetic commits of the same repo, so the sample has a readiness trend to show. */
+export function sampleHistory(): { label: string; at: string; files: RepoFile[] }[] {
+  const edit = (files: RepoFile[], path: string, from: string | RegExp, to: string) => files.map(f => f.path === path ? { ...f, text: f.text.replace(from, to) } : f)
+  let sep = SAMPLE_FILES
+  sep = edit(sep, 'services/billing/pom.xml', '  </dependencies>', `    <dependency>
+      <groupId>org.fusesource.leveldbjni</groupId>
+      <artifactId>leveldbjni-all</artifactId>
+      <version>1.8</version>
+    </dependency>
+  </dependencies>`)
+  sep = edit(sep, 'services/worker/Dockerfile', 'FROM golang:1.22-bookworm AS build', 'FROM --platform=linux/amd64 golang:1.22-bookworm AS build')
+  let aug = edit(sep, 'deploy/k8s/workloads.yaml', '  replicas: 6\n  template:\n    spec:\n', '  replicas: 6\n  template:\n    spec:\n      nodeSelector:\n        kubernetes.io/arch: amd64\n')
+  aug = edit(aug, 'services/api/Dockerfile', 'RUN apt-get update && apt-get install -y --no-install-recommends \\', 'RUN apt-get update && apt-get install -y --no-install-recommends msodbcsql17 \\')
+  return [
+    { label: 'Synthetic commit 3f1c2a0', at: '2026-08-14T10:00:00Z', files: aug },
+    { label: 'Synthetic commit 9b7e41d', at: '2026-09-22T10:00:00Z', files: sep },
+  ]
+}

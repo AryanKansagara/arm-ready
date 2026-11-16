@@ -1,7 +1,8 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { worklist, worklistCsv, type WorkState } from './engine/actions.ts'
 import { repoScore, scoreServices } from './engine/classify.ts'
-import { costLine, costSummary, DEFAULT_PRICES } from './engine/cost.ts'
+import { costLine, costSummary } from './engine/cost.ts'
+import { rowsFor, useRegionPrices } from './prices.ts'
 import type { Finding, ServiceScore, Status } from './engine/types.ts'
 import { runScan, seedSampleHistory, useProject, type ScanProgress } from './projectData.ts'
 import { getProject, saveProject, type Project as P, type Snapshot } from './store.ts'
@@ -128,7 +129,8 @@ function Overview({ p, findings, scanning, progress }: { p: P; findings: Finding
   const names = p.services.map(s => s.name)
   const scores = scoreServices(names.length ? names : [...new Set(findings.map(f => f.service))], findings)
   const n = (s: Status) => findings.filter(f => f.status === s).length
-  const cost = useMemo(() => p.inventory.length ? costSummary(p.inventory.map(r => costLine(r, p.prices ?? DEFAULT_PRICES, p.cost.gen, p.cost.perf))) : null, [p])
+  const table = useRegionPrices(p.cost.region)
+  const cost = useMemo(() => p.inventory.length ? costSummary(p.inventory.map(r => costLine(r, rowsFor(p.prices, table.prices), p.cost.gen, p.cost.perf, table.prices))) : null, [p, table.prices])
   const top = worklist(findings).filter(f => f.status === 'block').slice(0, 6)
   const svcOrder = [...scores].sort((a, b) => a.score - b.score)
   const prev = p.snapshots[p.snapshots.length - 2]

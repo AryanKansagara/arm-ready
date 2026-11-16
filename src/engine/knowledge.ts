@@ -56,14 +56,8 @@ export const JAVA: Record<string, JavaNote> = {
 /** Rust crates that link C code. */
 export const CARGO: Record<string, Note> = {
   'openssl-sys': { status: 'warn', title: 'Links OpenSSL', detail: 'Cross-compiling needs aarch64 OpenSSL headers; native arm64 builds just need libssl-dev.', fix: 'Build on an arm64 runner, or enable the "vendored" feature, or move to rustls.', effort: 'S' },
+  'tikv-jemalloc-sys': { status: 'warn', title: 'jemalloc bakes in the build host page size', detail: 'jemalloc is compiled for the page size of the machine that builds it. A binary built on a 4K-page host aborts with "Unsupported system page size" on arm64 kernels that use 16K or 64K pages.', fix: 'Set JEMALLOC_SYS_WITH_LG_PAGE=16 for the arm64 build so it runs on any page size. Amazon Linux 2023 and Bottlerocket on Graviton use 4K pages.', effort: 'S' },
+  'jemalloc-sys': { status: 'warn', title: 'jemalloc bakes in the build host page size', detail: 'jemalloc is compiled for the page size of the machine that builds it. A binary built on a 4K-page host aborts on arm64 kernels that use 16K or 64K pages.', fix: 'Set JEMALLOC_SYS_WITH_LG_PAGE=16 for the arm64 build, or move to tikv-jemalloc-sys.', effort: 'S' },
   'ring': { status: 'ok', title: 'ring has aarch64 assembly', detail: 'Supported on aarch64-unknown-linux-gnu and -musl.' },
   'rdkafka-sys': { status: 'warn', title: 'Builds librdkafka from C', detail: 'Needs cmake and a C compiler for the target.', fix: 'Build on an arm64 runner or install an aarch64 cross toolchain.', effort: 'S' },
-}
-
-/** x86 instance family -> Arm family by Graviton generation. */
-export const FAMILY_MAP: Record<string, { g3: string; g4: string }> = {
-  m5: { g3: 'm7g', g4: 'm8g' }, m5a: { g3: 'm7g', g4: 'm8g' }, m6i: { g3: 'm7g', g4: 'm8g' }, m6a: { g3: 'm7g', g4: 'm8g' }, m7i: { g3: 'm7g', g4: 'm8g' }, m7a: { g3: 'm7g', g4: 'm8g' },
-  c5: { g3: 'c7g', g4: 'c8g' }, c5a: { g3: 'c7g', g4: 'c8g' }, c6i: { g3: 'c7g', g4: 'c8g' }, c6a: { g3: 'c7g', g4: 'c8g' }, c7i: { g3: 'c7g', g4: 'c8g' }, c7a: { g3: 'c7g', g4: 'c8g' },
-  r5: { g3: 'r7g', g4: 'r8g' }, r5a: { g3: 'r7g', g4: 'r8g' }, r6i: { g3: 'r7g', g4: 'r8g' }, r6a: { g3: 'r7g', g4: 'r8g' }, r7i: { g3: 'r7g', g4: 'r8g' }, r7a: { g3: 'r7g', g4: 'r8g' },
-  t3: { g3: 't4g', g4: 't4g' }, t3a: { g3: 't4g', g4: 't4g' },
 }

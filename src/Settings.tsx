@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { REGIONS } from './prices.ts'
 import { BASE_DEFAULTS, getDefaults, resetDefaults, setDefaults, type Defaults } from './store.ts'
 import { setTheme, toast, useDark } from './ui.tsx'
 import { useSync } from './sync.ts'
@@ -15,7 +16,8 @@ export default function Settings() {
       <div className="card pad stack">
         <h2 className="h4">Defaults for new repos</h2>
         <div className="row gap wrap">
-          <label className="field"><span>Graviton generation for costing</span><select value={d.gen} onChange={e => save({ gen: e.target.value as Defaults['gen'] })}><option value="g3">Graviton3 (m7g, c7g, r7g)</option><option value="g4">Graviton4 (m8g, c8g, r8g)</option></select></label>
+          <label className="field"><span>Graviton generation for costing</span><select value={d.gen} onChange={e => save({ gen: e.target.value as Defaults['gen'] })}><option value="g3">Graviton3 (m7g, c7g, r7g)</option><option value="g4">Graviton4 (m8g, c8g, r8g)</option><option value="g5">Newest (m9g, c9g, r9g)</option></select></label>
+          <label className="field"><span>AWS region for prices</span><select value={d.region ?? 'us-east-1'} onChange={e => save({ region: e.target.value })}>{REGIONS.map(([c, n]) => <option key={c} value={c}>{c} · {n}</option>)}</select></label>
           <label className="field"><span>Arm performance factor</span><input type="number" min={0.5} max={2} step={0.05} value={d.perf} onChange={e => save({ perf: Math.min(2, Math.max(0.5, +e.target.value || 1)) })} /></label>
         </div>
         <label className="field"><span>Image registry prefix for generated CI</span><input value={d.registry} onChange={e => save({ registry: e.target.value })} placeholder="ghcr.io/your-org" /></label>

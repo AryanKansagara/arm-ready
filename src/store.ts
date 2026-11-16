@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from 'react'
 import type { WorkState } from './engine/actions.ts'
-import type { InventoryRow, PriceRow } from './engine/cost.ts'
+import type { Gen, InventoryRow, PriceRow } from './engine/cost.ts'
 import type { FileReport, Finding, Platform, RepoFile, Service, ServiceScore } from './engine/types.ts'
 
 export interface Snapshot {
@@ -27,7 +27,8 @@ export interface Project {
   overrides: Record<string, Platform[]>
   inventory: InventoryRow[]
   prices: PriceRow[] | null
-  cost: { gen: 'g3' | 'g4'; perf: number }
+  /** region is an AWS region code; missing means us-east-1 (projects saved before regions existed). */
+  cost: { gen: Gen; perf: number; region?: string }
   work: Record<string, WorkState>
   snapshots: Snapshot[]
   registry: string
@@ -145,7 +146,7 @@ export const clearTombstones = (ids: string[]) => localStorage.setItem(TOMB, JSO
 
 // ---------- App defaults (settings page) ----------
 
-export interface Defaults { gen: 'g3' | 'g4'; perf: number; registry: string; taintKey: string; taintValue: string; mode: 'required' | 'preferred' }
+export interface Defaults { gen: Gen; region?: string; perf: number; registry: string; taintKey: string; taintValue: string; mode: 'required' | 'preferred' }
 const DEF_KEY = 'arm-ready.defaults'
 export const BASE_DEFAULTS: Defaults = { gen: 'g4', perf: 1, registry: 'ghcr.io/your-org', taintKey: '', taintValue: 'arm64', mode: 'required' }
 export function getDefaults(): Defaults {
@@ -156,5 +157,5 @@ export const resetDefaults = () => localStorage.removeItem(DEF_KEY)
 
 export function blankProject(name: string): Project {
   const d = getDefaults(), now = Date.now()
-  return { id: uuid(), name, createdAt: now, updatedAt: now, files: [], services: [], findings: null, scannedAt: null, overrides: {}, inventory: [], prices: null, cost: { gen: d.gen, perf: d.perf }, work: {}, snapshots: [], registry: d.registry, k8s: { mode: d.mode, taintKey: d.taintKey, taintValue: d.taintValue } }
+  return { id: uuid(), name, createdAt: now, updatedAt: now, files: [], services: [], findings: null, scannedAt: null, overrides: {}, inventory: [], prices: null, cost: { gen: d.gen, perf: d.perf, region: d.region ?? 'us-east-1' }, work: {}, snapshots: [], registry: d.registry, k8s: { mode: d.mode, taintKey: d.taintKey, taintValue: d.taintValue } }
 }

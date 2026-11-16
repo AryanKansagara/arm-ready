@@ -1,13 +1,15 @@
 import { useMemo, useState } from 'react'
-import { costLine, costSummary, DEFAULT_PRICES, parseInventory, PRICES_AS_OF, splitType, toCsv, type InventoryRow, type PriceRow } from './engine/cost.ts'
+import { costLine, costSummary, parseInventory, splitType, toCsv, type Gen, type InventoryRow, type PriceRow } from './engine/cost.ts'
+import { REGIONS, rowsFor, useRegionPrices, type RegionPrices } from './prices.ts'
 import { SAMPLE_INVENTORY } from './engine/sample.ts'
 import { getProject, saveProject, type Project } from './store.ts'
 import { download, Empty, fmtUsd, Link, toast } from './ui.tsx'
 import { slug } from './widgets.tsx'
 
 export default function Cost({ project: p }: { project: Project }) {
-  const prices = p.prices ?? DEFAULT_PRICES
-  const lines = useMemo(() => p.inventory.map(r => costLine(r, prices, p.cost.gen, p.cost.perf)), [p.inventory, prices, p.cost])
+  const table = useRegionPrices(p.cost.region)
+  const prices = useMemo(() => rowsFor(p.prices, table.prices), [p.prices, table.prices])
+  const lines = useMemo(() => p.inventory.map(r => costLine(r, prices, p.cost.gen, p.cost.perf, table.prices)), [p.inventory, prices, p.cost, table.prices])
   const sum = costSummary(lines)
   const set = (patch: Partial<Project>) => void saveProject({ ...p, ...patch })
   const setRow = (i: number, patch: Partial<InventoryRow>) => set({ inventory: p.inventory.map((r, k) => k === i ? { ...r, ...patch } : r) })
@@ -32,13 +34,15 @@ export default function Cost({ project: p }: { project: Project }) {
         <div className="kpi card"><div className="kpi-label">Change</div><div className={`kpi-value ${sum.delta <= 0 ? 'ok-t' : 'block-t'}`}>{sum.delta <= 0 ? '−' : '+'}{fmtUsd(Math.abs(sum.delta))}</div><div className="kpi-sub">{(sum.pct * 100).toFixed(1)}% · {fmtUsd(Math.abs(sum.delta) * 12)}/yr</div></div>
         <div className="kpi card"><div className="kpi-label">Assumptions</div>
           <div className="seg" role="group" aria-label="Graviton generation" style={{ margin: '.35rem 0' }}>
-            <button type="button" aria-pressed={p.cost.gen === 'g3'} onClick={() => set({ cost: { ...p.cost, gen: 'g3' } })}>Graviton3</button>
-            <button type="button" aria-pressed={p.cost.gen === 'g4'} onClick={() => set({ cost: { ...p.cost, gen: 'g4' } })}>Graviton4</button>
+            {([['g3', 'Graviton3', 'm7g, c7g, r7g'], ['g4', 'Graviton4', 'm8g, c8g, r8g'], ['g5', '9g', 'm9g, c9g, r9g, where the region has them']] as [Gen, string, string][]).map(([g, label, title]) =>
+              <button key={g} type="button" title={title} aria-pressed={p.cost.gen === g} onClick={() => set({ cost: { ...p.cost, gen: g } })}>{label}</button>)}
           </div>
+          <label className="field"><span>Region</span><select value={p.cost.region ?? 'us-east-1'} onChange={e => { const edited = !!p.prices; set({ cost: { ...p.cost, region: e.target.value }, prices: null }); if (edited) toast('Edited prices were reset for the new region.') }}>{REGIONS.map(([c, n]) => <option key={c} value={c}>{c} · {n}</option>)}</select></label>
           <label className="field"><span>Arm performance factor: {p.cost.perf.toFixed(2)}×</span><input type="range" min={0.7} max={1.5} step={0.05} value={p.cost.perf} onChange={e => set({ cost: { ...p.cost, perf: +e.target.value } })} /></label>
         </div>
       </div>
 
+      {table.fallback && <div className="banner warn" role="status">{table.loading ? `Loading ${p.cost.region} prices from AWS…` : `Could not load ${p.cost.region} prices. Showing us-east-1 prices instead; reload to retry.`}</div>}
       <div className="banner">
         <b>Performance factor</b> = work one Arm instance does relative to the x86 instance it replaces, for <i>your</i> workload. 1.00 means same instance count. Load-test one service before trusting it: some teams report needing more instances, others fewer. <b>Break-even</b> is the factor at which Arm costs the same as today.
       </div>
@@ -79,18 +83,18 @@ export default function Cost({ project: p }: { project: Project }) {
         </div>
       </div>
 
-      <PriceTable p={p} prices={prices} />
+      <PriceTable p={p} prices={prices} table={table} />
     </div>
   )
 }
 
-function PriceTable({ p, prices }: { p: Project; prices: PriceRow[] }) {
+function PriceTable({ p, prices, table }: { p: Project; prices: PriceRow[]; table: RegionPrices }) {
   const [open, setOpen] = useState(false)
   const setPrice = (fam: string, v: number) => void saveProject({ ...p, prices: prices.map(r => r.family === fam ? { ...r, large: v } : r) })
   return (
     <div className="card pad">
       <div className="row between wrap gap-sm">
-        <div><h2 className="h4" style={{ marginBottom: '.2rem' }}>Price table</h2><p className="muted small" style={{ margin: 0 }}>AWS us-east-1, Linux, on-demand, USD/hour for the .large size; other sizes scale with vCPU. Curated {PRICES_AS_OF}{p.prices ? ', edited for this repo' : ''}. Check the EC2 pricing page for your region and any Savings Plan discount.</p></div>
+        <div><h2 className="h4" style={{ marginBottom: '.2rem' }}>Price table</h2><p className="muted small" style={{ margin: 0 }}>AWS {table.region}, Linux, on-demand, USD/hour, from the AWS price list published {table.asOf}{p.prices ? ', edited for this repo' : ''}. Every instance type in the region is priced; the families below can be overridden (enter your Savings Plan rate for the .large size and other sizes follow).</p></div>
         <div className="row gap-sm">
           {p.prices && <button type="button" className="btn ghost sm" onClick={() => { const prev = p.prices; void saveProject({ ...p, prices: null }); toast('Prices reset to defaults.', { undo: () => void saveProject({ ...getProject(p.id)!, prices: prev }) }) }}>Reset</button>}
           <button type="button" className="btn outline sm" aria-expanded={open} onClick={() => setOpen(o => !o)}>{open ? 'Hide' : 'Edit prices'}</button>

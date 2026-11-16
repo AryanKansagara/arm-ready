@@ -42,7 +42,8 @@ export const KIND_LABEL: Record<FileKind, string> = {
 
 // ---------- Image references ----------
 
-export interface ImageRef { registry: string; repo: string; tag: string; digest?: string; canonical: string }
+/** canonical is the stable key (digest wins over tag); name keeps both, the way the file wrote it. */
+export interface ImageRef { registry: string; repo: string; tag: string; digest?: string; canonical: string; name: string }
 
 export function parseImageRef(raw: string): ImageRef | null {
   let s = raw.trim().replace(/^["']|["']$/g, '')
@@ -50,10 +51,10 @@ export function parseImageRef(raw: string): ImageRef | null {
   let digest: string | undefined
   const at = s.indexOf('@')
   if (at >= 0) { digest = s.slice(at + 1); s = s.slice(0, at) }
-  let tag = 'latest'
+  let tag = 'latest', tagged = false
   const slash = s.lastIndexOf('/')
   const colon = s.lastIndexOf(':')
-  if (colon > slash) { tag = s.slice(colon + 1); s = s.slice(0, colon) }
+  if (colon > slash) { tag = s.slice(colon + 1); s = s.slice(0, colon); tagged = true }
   const parts = s.split('/')
   let registry = 'docker.io'
   if (parts.length > 1 && (parts[0].includes('.') || parts[0].includes(':') || parts[0] === 'localhost')) registry = parts.shift()!
@@ -62,7 +63,7 @@ export function parseImageRef(raw: string): ImageRef | null {
   if (!repo || !/^[a-z0-9._/-]+$/.test(repo)) return null
   if (registry === 'docker.io' && !repo.includes('/')) repo = 'library/' + repo
   const short = registry === 'docker.io' ? repo.replace(/^library\//, '') : `${registry}/${repo}`
-  return { registry, repo, tag, digest, canonical: `${short}${digest ? '@' + digest : ':' + tag}` }
+  return { registry, repo, tag, digest, canonical: `${short}${digest ? '@' + digest : ':' + tag}`, name: `${short}${digest ? (tagged ? ':' + tag : '') + '@' + digest : ':' + tag}` }
 }
 
 // ---------- Shared helpers ----------
@@ -87,12 +88,13 @@ function imageFinding(c: Ctx, raw: string, line: number, role: 'runtime' | 'buil
   // The same image used by a build stage and the final stage counts as runtime.
   const prev = c.out.find(f => f.id === `${c.service}|image|${ref.canonical}`)
   if (prev && role === 'runtime') { prev.role = 'runtime'; prev.line = line; prev.detail = ''; return }
-  add(c, { ecosystem: 'image', name: ref.canonical, line, status: 'pending', lookup: 'image', role, libc, title: 'Checking registry for linux/arm64', detail: '', effort: 'S' })
+  add(c, { ecosystem: 'image', name: ref.name, key: ref.canonical, line, status: 'pending', lookup: 'image', role, libc, title: 'Checking registry for linux/arm64', detail: '', effort: 'S' })
 }
 
 // ---------- Dockerfile ----------
 
-export interface DockerStage { image: string; alias?: string; platform?: string; line: number; internal: boolean }
+/** root is the registry image a stage is ultimately built on (FROM base AS x chains resolved). */
+export interface DockerStage { image: string; alias?: string; platform?: string; line: number; internal: boolean; root: string; rootLine: number; rootPlatform?: string }
 export interface DockerfileInfo { stages: DockerStage[]; libc: 'glibc' | 'musl'; language?: string }
 
 /** Joins backslash continuations, drops comments, keeps the first line number of each instruction. */
@@ -115,9 +117,13 @@ export function instructions(text: string): { line: number; op: string; args: st
   return out
 }
 
+/** Set per platform by BuildKit, so a default written in the Dockerfile says nothing about the target. */
+const PLATFORM_ARG = /^(BUILD|TARGET)(PLATFORM|OS|ARCH|VARIANT)$/
+
 export function substitute(s: string, vars: Record<string, string>): string {
   return s.replace(/\$\{(\w+)(?::?[-=]([^}]*))?\}|\$(\w+)/g, (all, a, def, b) => {
     const k = a ?? b
+    if (PLATFORM_ARG.test(k)) return '$' + k
     if (k in vars && vars[k] !== '') return vars[k]
     if (def !== undefined) return def
     return all
@@ -143,21 +149,25 @@ export function parseDockerfile(c: Ctx, text: string): DockerfileInfo & { issues
     if (op === 'ARG') {
       for (const part of args.split(/\s+/)) {
         const [name, ...v] = part.split('=')
-        if (name && !(name in vars)) vars[name] = v.join('=').replace(/^["']|["']$/g, '')
+        if (name && !(name in vars) && !PLATFORM_ARG.test(name)) vars[name] = v.join('=').replace(/^["']|["']$/g, '')
       }
     } else if (op === 'FROM') {
       const m = substitute(args, vars).match(/^(?:--platform=(\S+)\s+)?(\S+)(?:\s+as\s+(\S+))?/i)
       if (!m) { issues.push({ line, level: 'error', message: 'Could not read this FROM line.' }); continue }
       const [, platform, image, alias] = m
-      const internal = stages.some(s => s.alias?.toLowerCase() === image.toLowerCase()) || image === 'scratch'
+      const parent = stages.find(s => s.alias?.toLowerCase() === image.toLowerCase())
+      const internal = !!parent || image === 'scratch'
       const isFinal = k === finalIdx
-      stages.push({ image, alias, platform, line, internal })
-      if (/alpine/i.test(image)) libc = 'musl'
+      const root = parent?.root ?? image, rootLine = parent?.rootLine ?? line, rootPlatform = platform ?? parent?.rootPlatform
+      stages.push({ image, alias, platform, line, internal, root, rootLine, rootPlatform })
+      if (isFinal && rootPlatform && /BUILDPLATFORM/.test(rootPlatform) && root !== 'scratch')
+        add(c, { ecosystem: 'build', name: 'Runtime stage uses --platform=$BUILDPLATFORM', key: 'final-buildplatform', line: platform ? line : rootLine, status: 'warn', title: 'Shipped image follows the build host, not the target', detail: `The final stage is based on a stage pinned to $BUILDPLATFORM (line ${platform ? line : rootLine}). Built on an x86 runner with --platform=linux/arm64, the result still has an amd64 base and fails on Arm nodes.`, fix: 'Keep --platform=$BUILDPLATFORM on build stages only; start the final stage from the image without it.', effort: 'S' })
+      if (/alpine/i.test(root)) libc = 'musl'
       if (isFinal) {
-        libc = /alpine/i.test(image) ? 'musl' : 'glibc'
-        language = langOf(image) ?? language
-      } else language = language ?? langOf(image)
-      if (platform && /amd64|x86_64/.test(platform)) {
+        libc = /alpine/i.test(root) ? 'musl' : 'glibc'
+        language = langOf(root) ?? language
+      } else language = language ?? langOf(root)
+      if (platform && /amd64|x86_64/.test(platform.replace(/\$\{[^}]*\}|\$\w+/g, ''))) {
         add(c, { ecosystem: 'build', name: `FROM --platform=${platform} (line ${line})`, key: `platform-${line}`, line, status: 'block', title: 'Stage is pinned to linux/amd64', detail: `FROM --platform=${platform} forces an x86 image; on Arm nodes it runs under emulation or not at all.`, fix: isFinal ? 'Remove --platform so buildx picks the target platform.' : 'Use --platform=$BUILDPLATFORM for build stages and cross-compile with TARGETARCH.', effort: 'S' })
       }
       if (!internal) {
@@ -168,6 +178,9 @@ export function parseDockerfile(c: Ctx, text: string): DockerfileInfo & { issues
           const f = c.out[c.out.length - 1]
           if (f?.ecosystem === 'image') f.detail = 'Runs on the build host (--platform=$BUILDPLATFORM).'
         }
+      } else if (isFinal && parent && root !== 'scratch') {
+        // FROM base AS final: the image behind the alias is what ships.
+        imageFinding(c, root, rootLine, 'runtime', libc)
       }
     } else if (op === 'ENV') {
       for (const m of args.matchAll(/(\w+)[= ]("[^"]*"|\S+)/g)) vars[m[1]] = m[2].replace(/^"|"$/g, '')
@@ -186,6 +199,8 @@ export function parseDockerfile(c: Ctx, text: string): DockerfileInfo & { issues
       if (goarch) add(c, { ecosystem: 'build', name: `GOARCH=${goarch[1]}`, key: `goarch-${line}`, line, status: 'block', title: 'Go build hard-codes GOARCH', detail: `GOARCH=${goarch[1]} always produces an x86 binary, even in an arm64 image.`, fix: 'Use GOARCH=$TARGETARCH (declare ARG TARGETARCH in the stage) so buildx sets it per platform.', effort: 'S' })
       if (/\[\s*arch=amd64\s*\]/.test(cmd)) add(c, { ecosystem: 'apt', name: 'apt source [arch=amd64]', key: `aptarch-${line}`, line, status: 'block', title: 'apt repository pinned to amd64', detail: 'A sources.list entry declares [arch=amd64], so apt finds no packages from it on arm64.', fix: 'Use [arch=$(dpkg --print-architecture)] and confirm the vendor publishes arm64 packages.', effort: 'S' })
       if (/-march=(x86-64|native|haswell|skylake)|-mavx|-msse/.test(cmd)) add(c, { ecosystem: 'build', name: 'x86 compiler flags', key: `march-${line}`, line, status: 'block', title: 'x86-specific compiler flags', detail: 'Flags like -mavx, -msse or -march=x86-64 are rejected by aarch64 compilers.', fix: 'Guard them on TARGETARCH, or use -mcpu=neoverse-v1 / -march=armv8.2-a for arm64.', effort: 'S' })
+      if (/(puppeteer|@puppeteer\/browsers)\s+(browsers\s+)?install\s+chrome\b|playwright\s+install\s+(--with-deps\s+)?(chrome|msedge)\b/.test(cmd))
+        add(c, { ecosystem: 'binary', name: 'Chrome for Testing download', key: `chrome-${line}`, line, status: 'block', title: 'Google Chrome has no linux/arm64 build', detail: 'Chrome for Testing and branded Chrome/Edge are published for linux64 only, so this install fails or leaves no browser on arm64.', fix: 'Install the distro chromium package and point PUPPETEER_EXECUTABLE_PATH at it, or use "playwright install chromium", which ships arm64 builds.', effort: 'M' })
       for (const pkg of osPackages(cmd)) {
         const note = OS_PACKAGES[pkg.name]
         const eco: Ecosystem = pkg.mgr
@@ -274,6 +289,9 @@ export function parseCompose(file: string, text: string, out: Finding[], builtHe
   const issues: FileIssue[] = []
   let inServices = false, svcIndent = -1, current = ''
   let hasBuild = false
+  // x-defaults: &name blocks (and services with an anchor) that set image or build, merged with <<: *name.
+  const anchors = new Map<string, { image?: string; line: number; build: boolean }>()
+  let anchor = '', anchorIndent = -1
   const pendingImage: { image: string; line: number }[] = []
   const flush = () => {
     for (const p of pendingImage) {
@@ -289,6 +307,15 @@ export function parseCompose(file: string, text: string, out: Finding[], builtHe
     const l = lines[i]
     if (!l.trim() || l.trim().startsWith('#')) continue
     const ind = indentOf(l)
+    const def = l.match(/^\s*[\w.-]+:\s*&([\w.-]+)\s*$/)
+    if (def) { anchor = def[1]; anchorIndent = ind; anchors.set(anchor, { line: i + 1, build: false }) }
+    else if (anchor && ind <= anchorIndent) anchor = ''
+    else if (anchor && ind > anchorIndent) {
+      const a = anchors.get(anchor)!
+      const im = l.match(/^\s*image:\s*["']?([^"'\s#]+)/)
+      if (im) { a.image = im[1]; a.line = i + 1 }
+      if (/^\s*build:/.test(l)) a.build = true
+    }
     if (ind === 0) { if (inServices) flush(); inServices = /^services:\s*$/.test(l); current = ''; svcIndent = -1; continue }
     if (!inServices) continue
     if (svcIndent < 0) svcIndent = ind
@@ -300,8 +327,14 @@ export function parseCompose(file: string, text: string, out: Finding[], builtHe
     }
     if (!current) continue
     const img = l.match(/^\s*image:\s*["']?([^"'\s#]+)/)
-    if (img) pendingImage.push({ image: img[1], line: i + 1 })
+    if (img) { pendingImage.length = 0; pendingImage.push({ image: substitute(img[1], {}), line: i + 1 }) }
     if (/^\s*build:/.test(l)) hasBuild = true
+    if (ind > svcIndent && /^\s*<<:/.test(l)) for (const m of l.matchAll(/\*([\w.-]+)/g)) {
+      const a = anchors.get(m[1])
+      if (!a) continue
+      if (a.build) hasBuild = true
+      if (a.image && !pendingImage.length) pendingImage.push({ image: substitute(a.image, {}), line: i + 1 })
+    }
     const plat = l.match(/^\s*platform:\s*["']?([^"'\s#]+)/)
     if (plat && /amd64|x86_64/.test(plat[1])) add({ file, service: current, out }, { ecosystem: 'k8s', name: `platform: ${plat[1]}`, key: 'compose-platform', line: i + 1, status: 'block', title: 'Service pinned to linux/amd64', detail: 'platform: linux/amd64 makes Docker pull the x86 image and run it under emulation on Arm hosts.', fix: 'Remove the platform key once the image is multi-arch.', effort: 'S' })
   }
@@ -479,6 +512,9 @@ export function parseGradle(c: Ctx, text: string): FileIssue[] {
   return []
 }
 
+/** *-sys crates that are bindings to the OS or to JS, not to a C library that has to be built for Linux arm64. */
+const CARGO_NOT_NATIVE = /^(windows|winapi|js|web|linux-raw|core-foundation|security-framework|fsevent|mach2?|objc|ndk|wasi|hermit|redox_?syscall|io-kit|system-configuration)(-.*)?-sys$|^winapi-/
+
 export function parseCargo(c: Ctx, text: string): FileIssue[] {
   let name = '', line = 0, n = 0
   text.split(/\r?\n/).forEach((l, i) => {
@@ -489,7 +525,7 @@ export function parseCargo(c: Ctx, text: string): FileIssue[] {
       n++
       const note = CARGO[name]
       if (note) add(c, { ecosystem: 'cargo', name, version: v[1], line, status: note.status, title: note.title, detail: note.detail, fix: note.fix, effort: note.effort ?? 'S', source: 'curated' })
-      else if (name.endsWith('-sys')) add(c, { ecosystem: 'cargo', name, version: v[1], line, status: 'warn', title: 'Links a C library', detail: '*-sys crates compile or link native code; cross builds need the aarch64 headers.', fix: 'Build on an arm64 runner, or install the target dev package.', effort: 'S' })
+      else if (name.endsWith('-sys') && !CARGO_NOT_NATIVE.test(name)) add(c, { ecosystem: 'cargo', name, version: v[1], line, status: 'warn', title: 'Links a C library', detail: '*-sys crates compile or link native code; cross builds need the aarch64 headers.', fix: 'Build on an arm64 runner, or install the target dev package.', effort: 'S' })
       name = ''
     }
   })
@@ -500,13 +536,13 @@ export function parseCargo(c: Ctx, text: string): FileIssue[] {
 
 // ---------- Whole-repo analysis ----------
 
-const GROUP_DIRS = /^(services|apps|cmd|packages|src|svc|components|deploy|docker)$/i
+const GROUP_DIRS = /^(services|apps|cmd|packages|src|svc|components|deploy|deployments?|docker|dockerfiles|main|java|build|k8s|kubernetes|manifests|helm|charts?|ci|release)$/i
 
 /** The service a file belongs to: its nearest meaningful directory. */
 export function serviceOf(path: string): string {
   const dirs = path.split('/').slice(0, -1).filter(d => d && d !== '.')
   const meaningful = dirs.filter(d => !GROUP_DIRS.test(d))
-  return (meaningful[0] ?? dirs[dirs.length - 1] ?? 'root').toLowerCase()
+  return (meaningful[meaningful.length - 1] ?? dirs[dirs.length - 1] ?? 'root').toLowerCase()
 }
 
 export function analyze(files: RepoFile[]): Analysis {
@@ -523,13 +559,21 @@ export function analyze(files: RepoFile[]): Analysis {
   // Dockerfiles first so lockfiles know the libc, and deploy files know which images are built here.
   const libcByService = new Map<string, 'glibc' | 'musl'>()
   const builtHere = new Set<string>()
+  // A lockfile below a Dockerfile's directory (api/app/requirements.txt under api/Dockerfile) belongs to that service.
+  const dockerDirs = new Map<string, string>()
+  const dirOf = (p: string) => p.split('/').slice(0, -1).join('/')
+  for (const { f, kind } of kinds) if (kind === 'dockerfile' && dirOf(f.path) && !dockerDirs.has(dirOf(f.path))) dockerDirs.set(dirOf(f.path), serviceOf(f.path))
+  const owner = (path: string) => {
+    for (let d = dirOf(path); d; d = dirOf(d)) if (dockerDirs.has(d)) return dockerDirs.get(d)!
+    return serviceOf(path)
+  }
   const order: FileKind[] = ['dockerfile', 'requirements', 'poetry', 'package-lock', 'go-mod', 'pom', 'gradle', 'cargo', 'compose', 'k8s']
   for (const kind of order) {
     for (const { f } of kinds.filter(k => k.kind === kind)) {
       const lines = f.text.split('\n').length
       const before = findings.length
       let issues: FileIssue[] = []
-      const service = serviceOf(f.path)
+      const service = kind === 'dockerfile' ? serviceOf(f.path) : owner(f.path)
       const c: Ctx = { file: f.path, service, out: findings }
       if (kind === 'dockerfile') {
         const info = parseDockerfile(c, f.text)

@@ -12,13 +12,14 @@ const ACCEPT = [
 export function parseRef(raw) {
   let s = String(raw || '').trim()
   if (!s || s.length > 300 || !/^[\w.\-/:@]+$/.test(s)) return null
-  let ref = 'latest'
+  let ref = 'latest', tag = null
   const at = s.indexOf('@')
-  if (at >= 0) { ref = s.slice(at + 1); s = s.slice(0, at) }
-  else {
-    const slash = s.lastIndexOf('/'), colon = s.lastIndexOf(':')
-    if (colon > slash) { ref = s.slice(colon + 1); s = s.slice(0, colon) }
-  }
+  const digest = at >= 0 ? s.slice(at + 1) : null
+  if (at >= 0) s = s.slice(0, at)
+  const slash = s.lastIndexOf('/'), colon = s.lastIndexOf(':')
+  if (colon > slash) { tag = s.slice(colon + 1); s = s.slice(0, colon) }
+  // name:tag@sha256:... pulls by digest; the tag is kept as a fallback for the Hub API.
+  ref = digest || tag || 'latest'
   const parts = s.split('/')
   let host = 'docker.io'
   if (parts.length > 1 && (parts[0].includes('.') || parts[0].includes(':'))) host = parts.shift()
@@ -26,7 +27,7 @@ export function parseRef(raw) {
   if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+(:\d+)?$/i.test(host) || /^[\d.:]+$/.test(host)) return null
   let repo = parts.join('/').toLowerCase()
   if (host === 'docker.io' || host === 'index.docker.io') { host = 'docker.io'; if (!repo.includes('/')) repo = 'library/' + repo }
-  return { host, repo, ref }
+  return { host, repo, ref, tag }
 }
 
 const timeout = ms => AbortSignal.timeout(ms)
@@ -96,7 +97,12 @@ export async function lookup(raw) {
   if (p.host === 'docker.io' && !p.ref.startsWith('sha256:')) {
     try { const h = await hub(p.repo, p.ref); if (h) return h } catch { /* fall through to the registry API */ }
   }
-  try { return await oci(p.host, p.repo, p.ref) } catch (e) { return { ok: false, error: e?.name === 'TimeoutError' ? 'Registry timed out.' : 'Registry unreachable.' } }
+  try {
+    const r = await oci(p.host, p.repo, p.ref)
+    // Docker Hub limits anonymous pulls per IP; a digest-pinned image can still be answered from its tag.
+    if (!r.ok && r.status === 429 && p.host === 'docker.io' && p.tag) { const h = await hub(p.repo, p.tag).catch(() => null); if (h) return h }
+    return r
+  } catch (e) { return { ok: false, error: e?.name === 'TimeoutError' ? 'Registry timed out.' : 'Registry unreachable.' } }
 }
 
 export async function GET(request) {

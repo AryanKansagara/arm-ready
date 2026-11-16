@@ -1,20 +1,22 @@
 import { useEffect } from 'react'
 import { worklist } from './engine/actions.ts'
 import { repoScore, scoreServices } from './engine/classify.ts'
-import { costLine, costSummary, DEFAULT_PRICES, PRICES_AS_OF } from './engine/cost.ts'
+import { costLine, costSummary } from './engine/cost.ts'
+import { GEN_LABEL, rowsFor, useRegionPrices } from './prices.ts'
 import { useProject } from './projectData.ts'
 import { fmtUsd, Link, NotFound } from './ui.tsx'
 import { STATE_LABEL, StatusChip } from './widgets.tsx'
 
 export default function Report({ id }: { id: string }) {
   const { loading, project: p } = useProject(id)
+  const table = useRegionPrices(p?.cost.region)
   useEffect(() => { if (p) document.title = `arm64 readiness report: ${p.name}` }, [p?.name])
   if (loading) return <div className="boot"><span className="spinner" /></div>
   if (!p) return <NotFound />
   const findings = p.findings ?? []
   const scores = scoreServices(p.services.map(s => s.name), findings).sort((a, b) => a.score - b.score)
   const work = worklist(findings)
-  const lines = p.inventory.map(r => costLine(r, p.prices ?? DEFAULT_PRICES, p.cost.gen, p.cost.perf))
+  const lines = p.inventory.map(r => costLine(r, rowsFor(p.prices, table.prices), p.cost.gen, p.cost.perf, table.prices))
   const cost = lines.length ? costSummary(lines) : null
   const snaps = [...p.snapshots].sort((a, b) => a.createdAt - b.createdAt)
   return (
@@ -42,7 +44,7 @@ export default function Report({ id }: { id: string }) {
 
           {cost && <>
             <h2>Cost estimate</h2>
-            <p className="small muted">AWS us-east-1 Linux on-demand prices curated {PRICES_AS_OF}{p.prices ? ' (edited)' : ''}; {p.cost.gen === 'g4' ? 'Graviton4' : 'Graviton3'} targets; default performance factor {p.cost.perf.toFixed(2)}×. Validate with a load test.</p>
+            <p className="small muted">AWS {table.region} Linux on-demand prices published {table.asOf}{p.prices ? ' (edited)' : ''}; {GEN_LABEL[p.cost.gen]} targets; default performance factor {p.cost.perf.toFixed(2)}×. Validate with a load test.</p>
             <table className="vt compact"><thead><tr><th>Node group</th><th>x86</th><th>Arm</th><th className="num">Today</th><th className="num">On Arm</th><th className="num">Break-even</th></tr></thead>
               <tbody>{lines.map((l, i) => <tr key={i}><th scope="row">{l.service}</th><td>{l.count}× {l.instance}</td><td>{l.armCount}× {l.target ?? '–'}</td><td className="num">{fmtUsd(l.current)}</td><td className="num">{fmtUsd(l.projected)}</td><td className="num">{l.breakEven ? l.breakEven.toFixed(2) + '×' : '–'}</td></tr>)}
                 <tr><th scope="row">Total</th><td /><td /><td className="num"><b>{fmtUsd(cost.current)}</b></td><td className="num"><b>{fmtUsd(cost.projected)}</b></td><td /></tr></tbody></table>

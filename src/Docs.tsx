@@ -1,5 +1,5 @@
 import { cliExportScript } from './engine/actions.ts'
-import { PRICES_AS_OF } from './engine/cost.ts'
+import { EC2_PRICES, PRICES_AS_OF } from './engine/cost.ts'
 import { Code, Link } from './ui.tsx'
 
 const SECTIONS = [['upload', 'What to upload'], ['inventory', 'Instance inventory'], ['checks', 'How checks work'], ['offline', 'Private registries'], ['scores', 'Scores'], ['cost', 'Cost model'], ['ci', 'CI and rollout'], ['privacy', 'Privacy and sync']] as const
@@ -63,7 +63,8 @@ aws ec2 describe-instances --filters Name=instance-state-name,Values=running \\
           <p>Each service starts at 100 and loses 25 per blocker (max 75), 6 per warning (max 30) and 4 per unverified item (max 15). A service is <b>blocked</b> with any blocker, <b>needs work</b> with warnings or unverified items, and <b>ready</b> otherwise. The repo score is the mean across services. Every scan is saved to History so you can compare before and after.</p>
 
           <h2 id="cost">Cost model</h2>
-          <p>Prices: AWS us-east-1, Linux, on-demand, curated <b>{PRICES_AS_OF}</b>, stored per .large size and scaled linearly by vCPU (which matches EC2 pricing within each family). x86 families map to the same-shape Graviton family (m to m7g/m8g, c to c7g/c8g, r to r7g/r8g, t3 to t4g). All prices are editable per repo, and each row accepts a different target type.</p>
+          <p>Prices are Linux on-demand rates in USD per hour from the public price list behind the <a href="https://aws.amazon.com/ec2/pricing/on-demand/" target="_blank" rel="noreferrer">AWS EC2 On-Demand pricing page</a>. The us-east-1 table ships with the app ({Object.keys(EC2_PRICES).length} instance types, published <b>{PRICES_AS_OF}</b>); picking another of the 20 supported regions on the Cost tab loads that region's current list through <code>/api/prices</code> and keeps it for a week. Every size is priced individually, including nano to small, 3xlarge, 6xlarge, 9xlarge, 18xlarge and metal.</p>
+          <p>An x86 type maps to the Graviton family with the same class letter at the chosen generation (m5, m6i, m7a to m7g, m8g or m9g; c to c7g/c8g/c9g; r to r7g/r8g/r9g; t3 to t4g). Local NVMe (<code>d</code>) and network-optimised (<code>n</code>) variants are kept where a Graviton equivalent exists (m5d to m8gd, c5n to c8gn). If the Arm family has no instance of that size, or the region does not offer that generation yet, the next size up or the previous generation is used. Each row accepts a different target type, and per-family prices can be overridden, for example with a Savings Plan rate.</p>
           <p>The <b>performance factor</b> is how much work one Arm instance does relative to the instance it replaces. Arm count = ceil(count ÷ factor). <b>Break-even</b> is the Arm-to-x86 hourly price ratio: if your measured factor beats it, Arm is cheaper. Savings Plans and Reserved Instances discount both sides similarly; spot does not, so model it separately.</p>
 
           <h2 id="ci">CI and rollout</h2>

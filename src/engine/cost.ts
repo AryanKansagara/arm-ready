@@ -1,42 +1,72 @@
-import { FAMILY_MAP } from './knowledge.ts'
+import { EC2_PRICES, EC2_PRICES_AS_OF } from './ec2Prices.ts'
 import type { FileIssue } from './types.ts'
 
-/** AWS us-east-1, Linux, on-demand, USD per hour for the .large size (2 vCPU). Checked 2026-11-01. */
-export const PRICES_AS_OF = '2026-11-01'
-export interface PriceRow { family: string; arch: 'x86' | 'arm'; large: number }
-export const DEFAULT_PRICES: PriceRow[] = [
-  { family: 'm5', arch: 'x86', large: 0.096 }, { family: 'm5a', arch: 'x86', large: 0.086 }, { family: 'm6i', arch: 'x86', large: 0.096 }, { family: 'm6a', arch: 'x86', large: 0.0864 }, { family: 'm7i', arch: 'x86', large: 0.1008 }, { family: 'm7a', arch: 'x86', large: 0.11592 },
-  { family: 'c5', arch: 'x86', large: 0.085 }, { family: 'c5a', arch: 'x86', large: 0.077 }, { family: 'c6i', arch: 'x86', large: 0.085 }, { family: 'c6a', arch: 'x86', large: 0.0765 }, { family: 'c7i', arch: 'x86', large: 0.08925 }, { family: 'c7a', arch: 'x86', large: 0.10264 },
-  { family: 'r5', arch: 'x86', large: 0.126 }, { family: 'r5a', arch: 'x86', large: 0.113 }, { family: 'r6i', arch: 'x86', large: 0.126 }, { family: 'r6a', arch: 'x86', large: 0.1134 }, { family: 'r7i', arch: 'x86', large: 0.1323 }, { family: 'r7a', arch: 'x86', large: 0.15215 },
-  { family: 't3', arch: 'x86', large: 0.0832 }, { family: 't3a', arch: 'x86', large: 0.0752 },
-  { family: 'm6g', arch: 'arm', large: 0.077 }, { family: 'm7g', arch: 'arm', large: 0.0816 }, { family: 'm8g', arch: 'arm', large: 0.08976 },
-  { family: 'c6g', arch: 'arm', large: 0.068 }, { family: 'c7g', arch: 'arm', large: 0.0725 }, { family: 'c8g', arch: 'arm', large: 0.07976 },
-  { family: 'r6g', arch: 'arm', large: 0.1008 }, { family: 'r7g', arch: 'arm', large: 0.1071 }, { family: 'r8g', arch: 'arm', large: 0.11782 },
-  { family: 't4g', arch: 'arm', large: 0.0672 },
-]
+/** Instance type -> USD per hour, Linux on-demand, for one region. The bundled table is us-east-1. */
+export type PriceTable = Record<string, number>
+export const PRICES_AS_OF = EC2_PRICES_AS_OF
+export { EC2_PRICES }
 
-/** Price multiplier relative to .large. Sizes scale linearly with vCPU on AWS. */
-export const SIZE_FACTOR: Record<string, number> = { medium: 0.5, large: 1, xlarge: 2, '2xlarge': 4, '4xlarge': 8, '8xlarge': 16, '12xlarge': 24, '16xlarge': 32, '24xlarge': 48, '32xlarge': 64, '48xlarge': 96, metal: 96 }
+/** Editable per-family prices for the .large size; other sizes keep the ratio they have in the AWS table. */
+export interface PriceRow { family: string; arch: 'x86' | 'arm'; large: number }
+const FAMILIES: [PriceRow['arch'], string[]][] = [
+  ['x86', ['m5', 'm5a', 'm6i', 'm6a', 'm7i', 'm7a', 'c5', 'c5a', 'c6i', 'c6a', 'c7i', 'c7a', 'r5', 'r5a', 'r6i', 'r6a', 'r7i', 'r7a', 't3', 't3a']],
+  ['arm', ['m6g', 'm7g', 'm8g', 'c6g', 'c7g', 'c8g', 'r6g', 'r7g', 'r8g', 't4g']],
+]
+export const defaultPrices = (table: PriceTable = EC2_PRICES): PriceRow[] =>
+  FAMILIES.flatMap(([arch, fams]) => fams.filter(f => table[f + '.large']).map(family => ({ family, arch, large: table[family + '.large'] })))
+export const DEFAULT_PRICES: PriceRow[] = defaultPrices()
+
+/** vCPU relative to .large. Used to pick the next size up when the Arm family lacks one, and to price types missing from the table. */
+export const SIZE_FACTOR: Record<string, number> = { nano: 0.125, micro: 0.25, small: 0.5, medium: 0.5, large: 1, xlarge: 2, '2xlarge': 4, '3xlarge': 6, '4xlarge': 8, '6xlarge': 12, '8xlarge': 16, '9xlarge': 18, '10xlarge': 20, '12xlarge': 24, '16xlarge': 32, '18xlarge': 36, '24xlarge': 48, '32xlarge': 64, '48xlarge': 96, metal: 96 }
 
 export interface InventoryRow { service: string; instance: string; count: number; hours: number; perf?: number; target?: string }
 
 export function splitType(t: string): { family: string; size: string } | null {
-  const m = t.trim().toLowerCase().match(/^([a-z]+\d+[a-z]*)\.(\w+)$/)
-  return m && SIZE_FACTOR[m[2]] ? { family: m[1], size: m[2] } : null
+  const m = t.trim().toLowerCase().match(/^([a-z][a-z0-9-]*\d[a-z0-9-]*)\.([a-z0-9-]+)$/)
+  return m && (SIZE_FACTOR[m[2]] || EC2_PRICES[`${m[1]}.${m[2]}`]) ? { family: m[1], size: m[2] } : null
 }
 
-export function hourly(type: string, prices: PriceRow[]): number | null {
-  const t = splitType(type)
-  const p = t && prices.find(r => r.family === t.family)
-  return p && t ? +(p.large * SIZE_FACTOR[t.size]).toFixed(5) : null
-}
-
-export function armTarget(type: string, gen: 'g3' | 'g4'): string | null {
+export function hourly(type: string, prices: PriceRow[], table: PriceTable = EC2_PRICES): number | null {
   const t = splitType(type)
   if (!t) return null
-  const fam = FAMILY_MAP[t.family]?.[gen]
-  if (!fam) return t.family.includes('g') && /\dg/.test(t.family) ? type : null
-  return `${fam}.${t.size}`
+  const exact = table[`${t.family}.${t.size}`], base = table[`${t.family}.large`]
+  const row = prices.find(r => r.family === t.family)
+  if (!row) return exact ?? null
+  // The family row carries any edit (a discount, another region); the size ratio comes from AWS.
+  const factor = exact && base ? exact / base : SIZE_FACTOR[t.size]
+  return factor ? +(row.large * factor).toFixed(5) : null
+}
+
+/** Graviton families end their generation number with g: m7g, c7gn, r8gd, t4g, x2gd, im4gn. a1 is the first generation. */
+export const isArmFamily = (family: string) => /^[a-z]+\d+g/.test(family) || family === 'a1'
+
+export type Gen = 'g3' | 'g4' | 'g5'
+const GEN_NUMBERS: Record<Gen, number[]> = { g3: [7, 6], g4: [8, 7, 6], g5: [9, 8, 7, 6] }
+
+/**
+ * The Graviton type for an x86 type: same class letter, the newest generation at or below the chosen one,
+ * keeping local NVMe (d) and network (n) variants where they exist, at the same size or the next size up.
+ */
+export function armTarget(type: string, gen: Gen, table: PriceTable = EC2_PRICES): string | null {
+  const t = splitType(type)
+  if (!t) return null
+  if (isArmFamily(t.family)) return type.trim().toLowerCase()
+  // Only the general-purpose, compute, memory and burstable classes have a like-for-like Graviton shape.
+  const m = t.family.match(/^([mcrt])(\d+)([a-z]*)(?:-flex)?$/)
+  if (!m) return null
+  const cls = m[1], d = m[3].includes('d'), n = m[3].includes('n')
+  const variants = [...new Set([(d ? 'd' : '') + (n ? 'n' : ''), d ? 'd' : '', n ? 'n' : '', ''])]
+  const families = cls === 't' ? ['t4g'] : GEN_NUMBERS[gen].flatMap(g => variants.map(v => `${cls}${g}g${v}`))
+  // Price within a family tracks vCPU, which also sizes metal (m5.metal is a 24xlarge, c5.metal too).
+  const own = table[`${t.family}.${t.size}`], ownLarge = table[`${t.family}.large`]
+  const want = own && ownLarge ? Math.round(own / ownLarge * 8) / 8 : SIZE_FACTOR[t.size]
+  for (const fam of families) {
+    if (t.size !== 'metal' && table[`${fam}.${t.size}`]) return `${fam}.${t.size}`
+    if (!want) continue
+    const up = Object.keys(table).filter(k => k.startsWith(fam + '.')).map(k => k.slice(fam.length + 1)).filter(s => s !== 'metal' && SIZE_FACTOR[s] >= want).sort((a, b) => SIZE_FACTOR[a] - SIZE_FACTOR[b])[0]
+    if (up) return `${fam}.${up}`
+  }
+  return null
 }
 
 export interface CostLine extends Omit<InventoryRow, "target"> { target: string | null; x86Hourly: number | null; armHourly: number | null; armCount: number; current: number; projected: number; delta: number; breakEven: number | null; note?: string }
@@ -45,10 +75,10 @@ export interface CostLine extends Omit<InventoryRow, "target"> { target: string 
  * perf = Arm throughput relative to the current x86 instance for this workload (1.10 means each Arm instance does 10% more work).
  * Arm count = ceil(count / perf). Break-even perf is the factor at which Arm costs the same as today.
  */
-export function costLine(r: InventoryRow, prices: PriceRow[], gen: 'g3' | 'g4', globalPerf: number): CostLine {
+export function costLine(r: InventoryRow, prices: PriceRow[], gen: Gen, globalPerf: number, table: PriceTable = EC2_PRICES): CostLine {
   const perf = r.perf && r.perf > 0 ? r.perf : globalPerf
-  const target = r.target || armTarget(r.instance, gen)
-  const x = hourly(r.instance, prices), a = target ? hourly(target, prices) : null
+  const target = r.target || armTarget(r.instance, gen, table)
+  const x = hourly(r.instance, prices, table), a = target ? hourly(target, prices, table) : null
   const armCount = Math.max(1, Math.ceil(r.count / perf - 1e-9))
   const current = x !== null ? x * r.count * r.hours : 0
   const projected = a !== null ? a * armCount * r.hours : 0
@@ -57,7 +87,7 @@ export function costLine(r: InventoryRow, prices: PriceRow[], gen: 'g3' | 'g4', 
     ...r, target, x86Hourly: x, armHourly: a, armCount,
     current: ok ? round2(current) : 0, projected: ok ? round2(projected) : 0, delta: ok ? round2(projected - current) : 0,
     breakEven: ok ? +(a! / x!).toFixed(3) : null,
-    note: x === null ? `No price for ${r.instance}; add its family to the price table.` : a === null ? (target ? `No price for ${target}.` : 'No Arm equivalent mapped for this family.') : undefined,
+    note: x === null ? `No price for ${r.instance} in this region.` : a === null ? (target ? `No price for ${target}.` : 'No like-for-like Graviton type; enter an Arm type for this row.') : undefined,
   }
 }
 

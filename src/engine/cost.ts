@@ -87,7 +87,7 @@ export function costLine(r: InventoryRow, prices: PriceRow[], gen: Gen, globalPe
     ...r, target, x86Hourly: x, armHourly: a, armCount,
     current: ok ? round2(current) : 0, projected: ok ? round2(projected) : 0, delta: ok ? round2(projected - current) : 0,
     breakEven: ok ? +(a! / x!).toFixed(3) : null,
-    note: x === null ? `No price for ${r.instance} in this region.` : a === null ? (target ? `No price for ${target}.` : 'No like-for-like Graviton type; enter an Arm type for this row.') : undefined,
+    note: x === null ? `No price for ${r.instance} in this region.` : a === null ? (target ? `No price for ${target}.` : 'No like-for-like Graviton type; enter an Arm type.') : undefined,
   }
 }
 

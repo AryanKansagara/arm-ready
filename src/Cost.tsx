@@ -59,7 +59,7 @@ export default function Cost({ project: p }: { project: Project }) {
               <td className="num"><input type="number" min={0.3} max={3} step={0.05} value={p.inventory[i].perf ?? ''} placeholder={p.cost.perf.toFixed(2)} onChange={e => setRow(i, { perf: +e.target.value || undefined })} aria-label="Performance factor override" style={{ width: '4.8rem' }} /></td>
               <td className="num">{l.armCount}</td>
               <td className="num">{l.note ? '–' : fmtUsd(l.current)}</td>
-              <td className="num">{l.note ? <span className="warn-t small">{l.note}</span> : <>{fmtUsd(l.projected)}<div className={`tiny ${l.delta <= 0 ? 'ok-t' : 'block-t'}`}>{l.delta <= 0 ? '−' : '+'}{fmtUsd(Math.abs(l.delta))}</div></>}</td>
+              <td className="num">{l.note ? <span className="warn-t small" style={{ display: 'inline-block', whiteSpace: 'normal', maxWidth: '11rem', textAlign: 'right' }}>{l.note}</span> : <>{fmtUsd(l.projected)}<div className={`tiny ${l.delta <= 0 ? 'ok-t' : 'block-t'}`}>{l.delta <= 0 ? '−' : '+'}{fmtUsd(Math.abs(l.delta))}</div></>}</td>
               <td className="num">{l.breakEven ? `${l.breakEven.toFixed(2)}×` : '–'}</td>
               <td><button type="button" className="btn danger-ghost sm" aria-label={`Remove ${l.service}`} onClick={() => { const prev = p.inventory; set({ inventory: p.inventory.filter((_, k) => k !== i) }); toast(`Removed ${l.service}.`, { undo: () => void saveProject({ ...getProject(p.id)!, inventory: prev }) }) }}>×</button></td>
             </tr>))}

@@ -32,7 +32,7 @@ export default function Cost({ project: p }: { project: Project }) {
         <div className="kpi card"><div className="kpi-label">x86 today</div><div className="kpi-value">{fmtUsd(sum.current)}</div><div className="kpi-sub">per month, on-demand</div></div>
         <div className="kpi card"><div className="kpi-label">On Arm</div><div className="kpi-value">{fmtUsd(sum.projected)}</div><div className="kpi-sub">{lines.reduce((n, l) => n + l.armCount, 0)} instances vs {p.inventory.reduce((n, r) => n + r.count, 0)}</div></div>
         <div className="kpi card"><div className="kpi-label">Change</div><div className={`kpi-value ${sum.delta <= 0 ? 'ok-t' : 'block-t'}`}>{sum.delta <= 0 ? '−' : '+'}{fmtUsd(Math.abs(sum.delta))}</div><div className="kpi-sub">{(sum.pct * 100).toFixed(1)}% · {fmtUsd(Math.abs(sum.delta) * 12)}/yr</div></div>
-        <div className="kpi card"><div className="kpi-label">Assumptions</div>
+        <div className="kpi card assume"><div className="kpi-label">Assumptions</div>
           <div className="seg" role="group" aria-label="Graviton generation" style={{ margin: '.35rem 0' }}>
             {([['g3', 'Graviton3', 'm7g, c7g, r7g'], ['g4', 'Graviton4', 'm8g, c8g, r8g'], ['g5', '9g', 'm9g, c9g, r9g, where the region has them']] as [Gen, string, string][]).map(([g, label, title]) =>
               <button key={g} type="button" title={title} aria-pressed={p.cost.gen === g} onClick={() => set({ cost: { ...p.cost, gen: g } })}>{label}</button>)}

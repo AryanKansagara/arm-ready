@@ -198,7 +198,7 @@ function CiNote({ findings, p }: { findings: Finding[]; p: P }) {
     <div className="card pad grid-2">
       <div>
         <h2 className="h4">CI: build natively, not under QEMU</h2>
-        <p className="muted small">{compiles ? `${compiles} dependencies compile native code during the build (wheels from source, node-gyp, cgo). ` : ''}Under QEMU emulation those steps typically run 3 to 10 times slower. GitHub's ubuntu-24.04-arm runners (and Graviton CodeBuild or self-hosted runners) build arm64 natively; merge both platforms into one tag with buildx imagetools.</p>
+        <p className="muted small">{compiles ? `${compiles} ${compiles === 1 ? 'dependency compiles' : 'dependencies compile'} native code during the build (wheels from source, node-gyp, cgo). ` : ''}Under QEMU emulation those steps typically run 3 to 10 times slower. GitHub's ubuntu-24.04-arm runners (and Graviton CodeBuild or self-hosted runners) build arm64 natively; merge both platforms into one tag with buildx imagetools.</p>
         <Link href={`/app/p/${p.id}/actions`} className="btn outline sm">Get the workflow</Link>
       </div>
       <div>

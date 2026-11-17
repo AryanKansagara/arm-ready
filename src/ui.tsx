@@ -281,7 +281,7 @@ export function Footer() {
       <div className="footer-inner">
         <div className="footer-brand"><Monogram /> <strong>Arm Ready</strong></div>
         <nav className="footer-nav" aria-label="Footer"><Link href="/app">Repos</Link><Link href="/docs">Docs</Link><Link href="/settings">Settings</Link></nav>
-        <p>Built by Aryan Kansagara. Independent project, not affiliated with Arm.</p>
+        <p>Built by Aryan Kansagara.</p>
         <p className="muted small">The sample repo is synthetic. Your files are parsed in your browser and stay on this device unless you sign in to sync. Live checks send only image and package names to public registries.</p>
       </div>
     </footer>

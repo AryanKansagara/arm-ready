@@ -41,6 +41,9 @@ npm install
 npm run dev      # http://localhost:5173 (the manifest lookup function runs in the dev server too)
 npm test         # engine tests
 npm run build
+npm run test:e2e # builds, serves the production build with vite preview and runs the browser tests
 ```
+
+The end-to-end tests use Playwright with Chromium. Install the browser once with `npx playwright install chromium` (add `--with-deps` on a fresh Linux machine). They run signed out, answer every registry and price lookup from stubs, block Supabase, and fail on any other network request or uncaught page error. The preview server uses port 4179; set `E2E_PORT` to change it. The same steps run in GitHub Actions on every pull request and push to `main` ([.github/workflows/ci.yml](.github/workflows/ci.yml)).
 
 Optional sync needs `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` in `.env`.

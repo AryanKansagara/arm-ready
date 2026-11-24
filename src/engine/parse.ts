@@ -1,4 +1,5 @@
 import { CARGO, GO, JAVA, NPM, OS_PACKAGES } from './knowledge.ts'
+import { armOn, armTwins, describeLists, flowList, jsonList, LIBCS, linuxSupport, testFromConditions, testFromLists, type Libc, type PlatLists, type PlatTest } from './platform.ts'
 import type { Analysis, Ecosystem, FileIssue, FileKind, FileReport, Finding, RepoFile, Service } from './types.ts'
 
 // ---------- Format detection ----------
@@ -424,27 +425,80 @@ export function parsePoetry(c: Ctx, text: string, libc: 'glibc' | 'musl'): FileI
   return c.out.some(f => f.file === c.file) ? [] : [{ line: 1, level: 'error', message: 'No [[package]] entries found.' }]
 }
 
-export function parsePackageLock(c: Ctx, text: string): FileIssue[] {
-  let j: { lockfileVersion?: number; packages?: Record<string, { version?: string; hasInstallScript?: boolean; os?: string[]; cpu?: string[]; optional?: boolean; dev?: boolean }>; dependencies?: Record<string, { version?: string }> }
+/** 1-based line numbers by character offset, for lockfiles with thousands of entries. */
+function lineIndex(text: string) {
+  const starts = [0]
+  for (let i = text.indexOf('\n'); i >= 0; i = text.indexOf('\n', i + 1)) starts.push(i + 1)
+  return (pos: number) => {
+    let lo = 0, hi = starts.length - 1
+    while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (starts[mid] <= pos) lo = mid; else hi = mid - 1 }
+    return lo + 1
+  }
+}
+
+export function parsePackageLock(c: Ctx, text: string, libc?: Libc): FileIssue[] {
+  const conflict = conflictMarkers(c, 'package-lock.json', text)
+  if (conflict) return conflict
+  let j: unknown
   try { j = JSON.parse(text) } catch (e) {
     const pos = Number(String(e).match(/position (\d+)/)?.[1] ?? 0)
-    return [{ line: lineOf(text, pos), level: 'error', message: 'Not valid JSON: ' + (e instanceof Error ? e.message : String(e)) }]
+    return unreadable(c, 'package-lock.json', 'Not valid JSON: ' + (e instanceof Error ? e.message : String(e)), lineOf(text, pos))
   }
-  if (!j.packages) return [{ line: 1, level: 'error', message: `lockfileVersion ${j.lockfileVersion ?? 1} has no "packages" map. Regenerate with npm 7+ (npm install --package-lock-only).` }]
-  let pure = 0
-  for (const [path, p] of Object.entries(j.packages)) {
+  type Entry = { version?: string; hasInstallScript?: boolean; os?: unknown; cpu?: unknown; libc?: unknown; optional?: boolean; devOptional?: boolean; dev?: boolean; optionalDependencies?: unknown }
+  const doc = j as { lockfileVersion?: number; packages?: Record<string, Entry> } | null
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return unreadable(c, 'package-lock.json', 'The top level of the file is not a JSON object, so it is not a package-lock.json.')
+  if (!doc.packages) return unreadable(c, 'package-lock.json', `lockfileVersion ${doc.lockfileVersion ?? 1} has no "packages" map. Regenerate with npm 7+ (npm install --package-lock-only).`)
+  if (typeof doc.packages !== 'object' || Array.isArray(doc.packages)) return unreadable(c, 'package-lock.json', 'The "packages" field is not a map of paths to packages.')
+  const lineAt = lineIndex(text)
+  // Entries are written in file order, so each key is searched for after the previous one.
+  let cursor = 0
+  const lineOfKey = (path: string) => {
+    const needle = JSON.stringify(path)
+    for (const from of [cursor, 0]) {
+      for (let at = text.indexOf(needle, from); at >= 0; at = text.indexOf(needle, at + 1)) {
+        if (/^\s*:/.test(text.slice(at + needle.length, at + needle.length + 40))) { cursor = at; return lineAt(at) }
+      }
+    }
+    return 1
+  }
+
+  const entries = Object.entries(doc.packages)
+  const bad = entries.find(([, p]) => !p || typeof p !== 'object' || Array.isArray(p))
+  if (bad) return unreadable(c, 'package-lock.json', `"packages" entry ${JSON.stringify(bad[0])} is not an object, so the lockfile cannot be read.`, lineOfKey(bad[0]))
+  // A parent's optionalDependencies name the packages npm may skip, and the platform variants that stand in for each other.
+  const scan = newScan()
+  const optionalNames = new Set<string>()
+  for (const [, p] of entries) {
+    if (!p.optionalDependencies || typeof p.optionalDependencies !== 'object' || Array.isArray(p.optionalDependencies)) continue
+    const names = Object.keys(p.optionalDependencies)
+    scan.groups.push(names)
+    names.forEach(n => optionalNames.add(n))
+  }
+
+  let pure = 0, count = 0
+  for (const [path, p] of entries) {
     if (!path) continue
+    count++
     const name = path.replace(/^.*node_modules\//, '')
-    // Platform-specific optional packages (e.g. @esbuild/linux-x64) are picked per platform by npm.
-    if (p.cpu || p.os) continue
+    const line = lineOfKey(path)
+    // Platform-restricted packages (@esbuild/linux-x64, fsevents) are picked per platform by npm: judged by platformFindings.
+    const lists = { os: jsonList(p.os), cpu: jsonList(p.cpu), libc: jsonList(p.libc) }
+    if (lists.os !== undefined || lists.cpu !== undefined || lists.libc !== undefined) {
+      const readable = lists.os !== null && lists.cpu !== null && lists.libc !== null
+      const optional = p.optional === true || p.devOptional === true || optionalNames.has(name)
+      scan.platform.push({ name, version: p.version ?? '', line, ids: [name], test: readable ? testFromLists(lists as PlatLists) : null, spec: describeLists(lists as PlatLists), optional, dev: p.dev === true && !optional })
+      continue
+    }
     const known = NPM[name]
-    const line = lineOf(text, text.indexOf(`"${path}"`))
     if (known) add(c, { ecosystem: 'npm', name, version: p.version, line, status: known.status, title: known.title, detail: known.detail, fix: known.fix, effort: known.effort ?? 'S', source: 'curated' })
     else if (p.hasInstallScript) add(c, { ecosystem: 'npm', name, version: p.version, line, status: 'pending', lookup: 'npm', title: 'Checking npm for a native addon', detail: '', effort: 'S' })
     else pure++
   }
   if (pure) add(c, { ecosystem: 'npm', name: `${pure} pure-JS packages`, key: 'pure', line: 1, status: 'ok', title: 'No install scripts', detail: `${pure} packages have no install step, so they are architecture-neutral.`, effort: 'S' })
-  return []
+  const issues = platformFindings(c, scan, libc)
+  // A lockfile with only the root entry is a valid project without dependencies.
+  if (!count) issues.push({ line: 1, level: 'info', message: 'This lockfile lists no dependencies.' })
+  return issues
 }
 
 export function parseGoMod(c: Ctx, text: string): FileIssue[] {
@@ -553,15 +607,33 @@ export const NPM_LOOKUP_LIMIT = 100
 const NATIVE_HINT = /^(node-gyp|node-gyp-build|node-pre-gyp|@mapbox\/node-pre-gyp|prebuild-install|prebuildify|node-addon-api|nan|bindings|cmake-js|napi-macros)$/
 
 interface NodePkg { name: string; version: string; line: number; installScript?: boolean; hint?: boolean }
+/** A package with os / cpu / libc restrictions. */
+interface PlatPkg {
+  name: string; version: string; line: number
+  /** What the optional-dependency groups call this package: its name, an alias it is installed under, name@version. */
+  ids: string[]
+  /** null: the restriction is there but could not be read. */
+  test: PlatTest | null
+  /** The restriction as the lockfile wrote it. */
+  spec: string
+  /** true: only reachable through optional dependencies; false: required; undefined: the lockfile does not say. */
+  optional?: boolean
+  /** Needed only in the development tree. */
+  dev?: boolean
+}
 interface NodeScan {
   pkgs: NodePkg[]
+  /** Packages restricted by os, cpu or libc: not looked up on npm, judged by platformFindings. */
+  platform: PlatPkg[]
+  /** What one parent lists together as optional dependencies (the platform variants of one package), as PlatPkg ids. */
+  groups: string[][]
   /** workspace, link, portal and file entries: the project's own code. */
   local: { count: number; line: number }
   /** git, tarball URL and other non-registry entries. */
   remote: { name: string; version?: string; spec: string; line: number }[]
 }
 
-const newScan = (): NodeScan => ({ pkgs: [], local: { count: 0, line: 0 }, remote: [] })
+const newScan = (): NodeScan => ({ pkgs: [], platform: [], groups: [], local: { count: 0, line: 0 }, remote: [] })
 const addLocal = (s: NodeScan, line: number) => { if (!s.local.count++) s.local.line = line }
 
 /** An unreadable or unsupported lockfile is an error AND an unknown finding, so the service never looks ready. */
@@ -570,8 +642,70 @@ function unreadable(c: Ctx, label: string, message: string, line = 1): FileIssue
   return [{ line, level: 'error', message }]
 }
 
+/** An unmerged git conflict is not a lockfile: error plus unknown finding. null when there is none. */
+function conflictMarkers(c: Ctx, label: string, text: string): FileIssue[] | null {
+  const m = text.match(/^(?:<{7}|={7}|>{7})(?:\s|$)/m)
+  if (!m) return null
+  const line = lineOf(text, m.index!)
+  return unreadable(c, label, `Unresolved merge conflict markers at line ${line}, so the lockfile cannot be read. Resolve the conflict, regenerate the lockfile and import it again.`, line)
+}
+
+/**
+ * Judges the os / cpu / libc restricted packages of a lockfile for linux/arm64.
+ *  - Does not apply to Linux, or installs on linux/arm64: nothing to report.
+ *  - A package that is only optional and has an arm64 variant in the same parent's optional dependencies (esbuild, sharp,
+ *    @parcel/watcher) is the usual per-platform family: nothing to report.
+ *  - Otherwise: required = blocker, dev only or optional = warning, optional status unrecorded = unknown.
+ */
+function platformFindings(c: Ctx, scan: NodeScan, libc?: Libc): FileIssue[] {
+  const issues: FileIssue[] = []
+  // Some packages do not declare libc but say it in the name (lightningcss-linux-x64-gnu, -musl).
+  const nameLibc = (p: PlatPkg): Libc | undefined => [p.name, ...p.ids].map(n => (/musl/i.test(n) ? 'musl' : /gnu|glibc/i.test(n) ? 'glibc' : undefined)).find(Boolean)
+  const arm = new Map<string, Set<Libc>>()
+  for (const p of scan.platform) {
+    if (!p.test) continue
+    for (const l of LIBCS) if (armOn(p.test, l) && (!nameLibc(p) || nameLibc(p) === l)) for (const id of p.ids) arm.set(id, (arm.get(id) ?? new Set()).add(l))
+  }
+  const siblings = new Map<string, Set<string>>()
+  for (const g of scan.groups) for (const n of g) { const s = siblings.get(n) ?? new Set(); g.forEach(x => x !== n && s.add(x)); siblings.set(n, s) }
+
+  for (const p of scan.platform) {
+    const id = `${p.name}@${p.version}`
+    if (!p.test) {
+      add(c, { ecosystem: 'npm', name: p.name, key: `platform|${id}`, version: p.version, line: p.line, status: 'unknown', title: 'Platform restriction could not be read', detail: `${id} has os, cpu or libc fields that this tool cannot read, so it is unknown whether it installs on linux/arm64.`, fix: 'Check the package on npm: its package.json "os", "cpu" and "libc" fields.', effort: 'S', source: 'lockfile' })
+      issues.push({ line: p.line, level: 'warn', message: `${id}: the os/cpu/libc fields could not be read.` })
+      continue
+    }
+    const s = linuxSupport(p.test, libc)
+    s.noArm = s.noArm.filter(l => !nameLibc(p) || nameLibc(p) === l)
+    if (!s.noArm.length) continue
+    // The arm64 counterpart is in the lockfile: a variant listed next to it in a parent's optional dependencies, or the same name with arm64 for x64.
+    const covered = (l: Libc) => p.ids.some(i => [...(siblings.get(i) ?? [])].some(n => !p.ids.includes(n) && arm.get(n)?.has(l)) || armTwins(i).some(n => !p.ids.includes(n) && arm.get(n)?.has(l)))
+    if (s.noArm.every(covered)) continue
+
+    const where = !libc && s.applies.length === 1 ? ` on ${s.applies[0]} Linux` : ''
+    const cpus = s.cpus.length > 4 ? 'every CPU except arm64' : `only ${s.cpus.join(', ') || 'no listed CPU'}`
+    const base = `${id} installs on Linux for ${cpus}${where} (${p.spec}), and this lockfile has no linux/arm64 build of it.`
+    const f = { ecosystem: 'npm' as const, name: p.name, key: `platform|${id}`, version: p.version, line: p.line, source: 'lockfile' }
+    if (p.optional === false && !p.dev) {
+      add(c, { ...f, status: 'block', title: 'Required package has no linux/arm64 build', detail: `${base} It is not optional, so an arm64 install either refuses it (npm: EBADPLATFORM) or installs a binary that cannot run.`, fix: 'Move to a release that publishes linux-arm64 binaries, replace the package, or keep this service on x86 nodes.', effort: 'M' })
+      issues.push({ line: p.line, level: 'warn', message: `${id} is required but supports ${cpus} on Linux (${p.spec}).` })
+    } else if (p.optional === false) {
+      add(c, { ...f, status: 'warn', title: 'Dev dependency has no linux/arm64 build', detail: `${base} It is only used in development, so a production install that leaves out dev dependencies is not affected. Builds that install dev dependencies on arm64 (compile, test) fail on it.`, fix: 'Build and test on x86, or move to a release or replacement with a linux-arm64 build.', effort: 'S' })
+      issues.push({ line: p.line, level: 'warn', message: `${id} is a dev dependency that supports ${cpus} on Linux (${p.spec}).` })
+    } else if (p.optional === true) {
+      add(c, { ...f, status: 'warn', title: 'Optional package is skipped on arm64', detail: `${base} It is optional, so an arm64 install skips it and carries on. Whatever it provides is missing there, or its parent falls back to slower or different code.`, fix: 'Check what the parent package does without it, and whether a newer release adds a linux-arm64 build.', effort: 'S' })
+      issues.push({ line: p.line, level: 'warn', message: `${id} is optional and supports ${cpus} on Linux (${p.spec}); arm64 installs skip it.` })
+    } else {
+      add(c, { ...f, status: 'unknown', title: 'x64-only package: optional or required is not recorded', detail: `${base} This lockfile does not say whether it is optional, so it is unknown whether an arm64 install fails or skips it.`, fix: 'Find what depends on it (npm ls, yarn why, pnpm why) and check whether that dependency is optional.', effort: 'S' })
+      issues.push({ line: p.line, level: 'warn', message: `${id} supports ${cpus} on Linux (${p.spec}); it is not recorded whether it is optional.` })
+    }
+  }
+  return issues
+}
+
 /** Turns scanned packages into findings. Shared by yarn.lock and pnpm-lock.yaml. */
-function finishNodeLock(c: Ctx, scan: NodeScan, label: string): FileIssue[] {
+function finishNodeLock(c: Ctx, scan: NodeScan, label: string, libc?: Libc): FileIssue[] {
   const issues: FileIssue[] = []
   const seen = new Map<string, NodePkg>()
   for (const p of scan.pkgs) {
@@ -606,7 +740,8 @@ function finishNodeLock(c: Ctx, scan: NodeScan, label: string): FileIssue[] {
     add(c, { ecosystem: 'npm', name: r.name, key: `${r.name}@${r.spec}`, version: r.version, line: r.line, status: 'unknown', title: 'Not installed from the npm registry', detail: `Installed from ${r.spec}. A lockfile entry like this has no install-script data and npm cannot be asked about it.`, fix: 'Look in that repository or archive for node-gyp, prebuild or binding.gyp, and build it on arm64.', effort: 'M' })
     issues.push({ line: r.line, level: 'warn', message: `${r.name} comes from ${r.spec}, not the npm registry, so it cannot be checked.` })
   }
-  if (!scan.pkgs.length && !scan.remote.length) issues.push({ line: 1, level: 'info', message: 'No packages from the npm registry in this lockfile.' })
+  issues.push(...platformFindings(c, scan, libc))
+  if (!scan.pkgs.length && !scan.remote.length && !scan.platform.length) issues.push({ line: 1, level: 'info', message: 'No packages from the npm registry in this lockfile.' })
   return issues
 }
 
@@ -635,8 +770,29 @@ function splitYarn1Keys(raw: string): string[] {
   return (raw.match(/"(?:[^"\\]|\\.)*"|[^,\s][^,]*/g) ?? []).map(k => unquote(k.trim()))
 }
 
-export function parseYarnClassic(c: Ctx, text: string): FileIssue[] {
+/**
+ * The first line that is not in the layout Yarn writes (yarnpkg/yarn src/lockfile/stringify.js, berry Project.ts via stringifySyml):
+ * entry keys at column 0 ending in ":", comments with "#", everything else indented by spaces in steps of 2.
+ */
+function yarnLayoutProblem(L: string[], maxIndent: number): { line: number; message: string } | null {
+  for (let i = 0; i < L.length; i++) {
+    const l = L[i]
+    if (!l.trim()) continue
+    if (/^ *\t/.test(l)) return { line: i + 1, message: `Line ${i + 1} is indented with a tab, but yarn.lock is indented with spaces, so its entries cannot be read.` }
+    const indent = l.length - l.trimStart().length
+    if (indent === 0) {
+      if (l[0] === '#' || l.endsWith(':')) continue
+      return { line: i + 1, message: `Line ${i + 1} is not a yarn.lock entry (an entry starts with a key line ending in ":"), so the file cannot be read.` }
+    }
+    if (indent % 2 || indent > maxIndent) return { line: i + 1, message: `Line ${i + 1} is indented by ${indent} spaces, which yarn.lock does not use, so its entries cannot be read.` }
+  }
+  return null
+}
+
+export function parseYarnClassic(c: Ctx, text: string, libc?: Libc): FileIssue[] {
   const L = text.split(/\r?\n/)
+  const problem = yarnLayoutProblem(L, 4)
+  if (problem) return unreadable(c, 'yarn.lock', problem.message, problem.line)
   const scan = newScan()
   for (let i = 0; i < L.length; i++) {
     const l = L[i]
@@ -654,7 +810,8 @@ export function parseYarnClassic(c: Ctx, text: string): FileIssue[] {
       if (m[1] === 'version') version = unquote(m[2] ?? '')
     }
     i--
-    if (!keys.length || !version) continue
+    // Yarn 1 writes a version for every entry. One without is a damaged file, never a package to skip.
+    if (!keys.length || !version) return unreadable(c, 'yarn.lock', `The entry at line ${start + 1} has no version field, so the file is not a yarn.lock this tool can read.`, start + 1)
     const line = start + 1
     let { name, range } = splitSpec(keys[0])
     const kind = yarnRangeKind(range)
@@ -666,13 +823,16 @@ export function parseYarnClassic(c: Ctx, text: string): FileIssue[] {
       scan.pkgs.push({ name, version, line, hint: deps.some(d => NATIVE_HINT.test(d)) })
     }
   }
-  return finishNodeLock(c, scan, 'yarn.lock')
+  const issues = finishNodeLock(c, scan, 'yarn.lock', libc)
+  // Yarn 1 does not write os, cpu or libc (yarnpkg/yarn src/lockfile/stringify.js), so x64-only packages cannot be found here.
+  if (scan.pkgs.length) issues.push({ line: 1, level: 'info', message: 'Yarn 1 does not record os, cpu or libc in yarn.lock, so packages that only support x64 cannot be detected from this file. A package-lock.json or pnpm-lock.yaml from the same project records them.' })
+  return issues
 }
 
 /** `__metadata.version` values read: Yarn 2.4 (4) up to LOCKFILE_VERSION in Project.ts on master (10). */
 const BERRY_VERSIONS = [4, 10] as const
 
-export function parseYarnBerry(c: Ctx, text: string): FileIssue[] {
+export function parseYarnBerry(c: Ctx, text: string, libc?: Libc): FileIssue[] {
   const L = text.split(/\r?\n/)
   const metaAt = L.findIndex(l => /^__metadata:/.test(l))
   let version = 0
@@ -683,42 +843,66 @@ export function parseYarnBerry(c: Ctx, text: string): FileIssue[] {
   const [lo, hi] = BERRY_VERSIONS
   if (!version) return unreadable(c, 'yarn.lock', 'The __metadata block has no version, so the yarn.lock layout is unknown.', metaAt + 1)
   if (version < lo || version > hi) return unreadable(c, 'yarn.lock', `yarn.lock __metadata version ${version} is not supported. This tool reads versions ${lo} to ${hi}. Run yarn install with a current Yarn to rewrite it.`, metaAt + 1)
+  const problem = yarnLayoutProblem(L, 8)
+  if (problem) return unreadable(c, 'yarn.lock', problem.message, problem.line)
   const scan = newScan()
+  /** Names some entry depends on as required / as optional (dependenciesMeta: optional: true). */
+  const required = new Set<string>(), optional = new Set<string>()
+  const restricted: { p: PlatPkg }[] = []
+  let entries = 0
   for (let i = 0; i < L.length; i++) {
     const l = L[i]
     if (!l || l[0] === ' ' || l[0] === '#' || !l.endsWith(':') || /^__metadata:/.test(l)) continue
+    entries++
     const start = i
-    let resolution = '', ver = '', conditions = '', section = ''
-    const deps: string[] = []
+    // "a@npm:^1, @scope/a-linux-x64@npm:@scope/a@1.0.0-linux-x64": the names the entry is installed under. For an alias that is the alias, not the real package.
+    const aliases = unquote(l.slice(0, -1)).split(/,\s*/).map(d => splitSpec(d.trim()).name).filter(Boolean)
+    let resolution = '', ver = '', conditions = '', section = '', metaKey = ''
+    const deps: string[] = [], optionalDeps: string[] = []
     for (i++; i < L.length && (L[i] === '' || L[i][0] === ' '); i++) {
       const f = L[i]
-      if (/^ {4}\S/.test(f)) { if (section === 'dependencies') deps.push(unquote(f.trim().match(/^"(?:[^"\\]|\\.)*"|^[^\s:]+/)![0])); continue }
+      if (/^ {4}\S/.test(f)) {
+        const key = unquote(f.trim().match(/^"(?:[^"\\]|\\.)*"|^[^\s:]+/)![0])
+        if (section === 'dependencies') deps.push(key)
+        if (section === 'dependenciesMeta') metaKey = splitSpec(key).name
+        continue
+      }
+      if (/^ {6}optional:\s*"?true"?\s*$/.test(f) && section === 'dependenciesMeta' && metaKey) { optionalDeps.push(metaKey); continue }
       const m = f.match(/^ {2}(\w+):(?: (.*))?$/)
       if (!m) continue
       section = m[1]
       if (m[1] === 'resolution') resolution = unquote(m[2] ?? '')
       if (m[1] === 'version') ver = unquote(m[2] ?? '')
-      if (m[1] === 'conditions') conditions = m[2] ?? ''
+      if (m[1] === 'conditions') conditions = unquote(m[2] ?? '')
     }
     i--
-    if (!resolution) continue
+    // Yarn 2+ writes a resolution for every entry. One without is a damaged file, never a package to skip.
+    if (!resolution) return unreadable(c, 'yarn.lock', `The entry at line ${start + 1} has no resolution field, so the file is not a yarn.lock this tool can read.`, start + 1)
     const line = start + 1
     // The resolution is the real identity, even for aliases: "string-width-cjs@npm:string-width@^4" resolves to "string-width@npm:4.2.3".
     const { name, range: ref } = splitSpec(resolution)
     if (/^patch:/.test(ref)) continue // A patched copy of an entry that is listed on its own.
+    for (const d of deps) (optionalDeps.includes(d) ? optional : required).add(d)
+    if (optionalDeps.length) scan.groups.push(optionalDeps)
     if (/^(workspace|link|portal|file):/.test(ref)) addLocal(scan, line)
     else if (/^npm:/.test(ref)) {
-      if (conditions) continue // os/cpu-conditional packages are picked per platform by Yarn.
-      scan.pkgs.push({ name, version: ver || ref.slice(4).split('::')[0], line, hint: deps.some(d => NATIVE_HINT.test(d)) })
+      const v = ver || ref.slice(4).split('::')[0]
+      // os/cpu/libc-conditional packages: Yarn installs them per platform. Judged by platformFindings.
+      if (conditions) restricted.push({ p: { name, version: v, line, ids: aliases.length ? [...new Set(aliases)] : [name], test: testFromConditions(conditions), spec: conditions } })
+      else scan.pkgs.push({ name, version: v, line, hint: deps.some(d => NATIVE_HINT.test(d)) })
     } else scan.remote.push({ name, version: ver || undefined, spec: ref.replace(/#.*$/, ''), line })
   }
-  return finishNodeLock(c, scan, 'yarn.lock')
+  if (!entries) return unreadable(c, 'yarn.lock', 'The file has a __metadata block but no package entries (even an empty project lists its own workspace), so it looks truncated.', metaAt + 1)
+  for (const { p } of restricted) { p.optional = p.ids.some(i => required.has(i)) ? false : p.ids.some(i => optional.has(i)) ? true : undefined; scan.platform.push(p) }
+  return finishNodeLock(c, scan, 'yarn.lock', libc)
 }
 
-export function parseYarnLock(c: Ctx, text: string): FileIssue[] {
-  if (/^__metadata:/m.test(text)) return parseYarnBerry(c, text)
+export function parseYarnLock(c: Ctx, text: string, libc?: Libc): FileIssue[] {
+  const conflict = conflictMarkers(c, 'yarn.lock', text)
+  if (conflict) return conflict
+  if (/^__metadata:/m.test(text)) return parseYarnBerry(c, text, libc)
   const v = text.match(/^# yarn lockfile v(\d+)/m)
-  if (v) return v[1] === '1' ? parseYarnClassic(c, text) : unreadable(c, 'yarn.lock', `"# yarn lockfile v${v[1]}" is not a yarn.lock format this tool reads (Yarn 1 writes v1, Yarn 2 and later write a __metadata block).`)
+  if (v) return v[1] === '1' ? parseYarnClassic(c, text, libc) : unreadable(c, 'yarn.lock', `"# yarn lockfile v${v[1]}" is not a yarn.lock format this tool reads (Yarn 1 writes v1, Yarn 2 and later write a __metadata block).`)
   return unreadable(c, 'yarn.lock', 'Not a recognised yarn.lock: expected "# yarn lockfile v1" (Yarn 1) or a "__metadata:" block (Yarn 2 and later).')
 }
 
@@ -734,7 +918,9 @@ function pnpmKey(l: string): string | null {
 
 const SEMVER = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]*)?$/
 
-export function parsePnpmLock(c: Ctx, text: string): FileIssue[] {
+export function parsePnpmLock(c: Ctx, text: string, libc?: Libc): FileIssue[] {
+  const conflict = conflictMarkers(c, 'pnpm-lock.yaml', text)
+  if (conflict) return conflict
   const all = text.split(/\r?\n/)
   // pnpm can put an environment (config dependencies) document first and the project lockfile last, split by "---".
   const docs: { start: number; end: number }[] = []
@@ -758,40 +944,76 @@ export function parsePnpmLock(c: Ctx, text: string): FileIssue[] {
     return unreadable(c, 'pnpm-lock.yaml', `pnpm-lock.yaml lockfileVersion ${lv} is not supported. This tool reads 9.x (pnpm 9 and later) and 6.x (pnpm 8). ${old ? 'Versions 5.x and older were written by pnpm 7 and earlier.' : 'This is a newer or experimental format.'} Regenerate it with a current pnpm using its default lockfile format.`, at(L.findIndex(l => /lockfileVersion/.test(l))))
   }
 
-  interface Entry { key: string; line: number; platform: boolean; resolution: string; requiresBuild: boolean; deps: string[] }
+  interface Entry {
+    key: string; line: number; resolution: string; requiresBuild: boolean; deps: string[]; optDeps: string[]
+    /** os / cpu / libc as written: a list, or null when the value is not a list. */
+    lists: Record<string, string[] | null>
+    optional?: boolean; dev?: boolean
+  }
   const sections: Record<string, Entry[]> = { packages: [], snapshots: [] }
   let section = '', cur: Entry | null = null, sub = ''
-  let links = 0, linkLine = 0
+  let links = 0, linkLine = 0, registryRefs = 0, bad = 0, scalarOf = -1
+  const tops = new Set<string>()
   L.forEach((l, i) => {
     const top = l.match(/^(\w+):/)
-    if (top) { section = top[1]; cur = null; sub = ''; return }
+    if (top) { section = top[1]; tops.add(section); cur = null; sub = ''; return }
     if (section === 'packages' || section === 'snapshots') {
+      if (!l.trim() || /^\s*#/.test(l)) return
+      const indent = l.length - l.trimStart().length
+      // Lines of a block scalar ("deprecated: |-") can be indented any way.
+      if (scalarOf >= 0) { if (indent > scalarOf) return; scalarOf = -1 }
+      // pnpm writes 2 spaces for an entry key and 4 for its fields. Anything else is not read, never skipped silently.
+      if (/^ *\t/.test(l)) { bad ||= at(i); return }
       const k = pnpmKey(l)
-      if (k !== null) { cur = { key: k, line: at(i), platform: false, resolution: '', requiresBuild: false, deps: [] }; sections[section].push(cur); sub = ''; return }
-      if (!cur) return
-      if (/^ {4}\S/.test(l)) {
+      if (k !== null) { cur = { key: k, line: at(i), resolution: '', requiresBuild: false, deps: [], optDeps: [], lists: {} }; sections[section].push(cur); sub = ''; return }
+      if (!cur || indent < 4 || indent % 2) { bad ||= at(i); return }
+      if (indent === 4) {
         const m = l.match(/^ {4}(\w+):(?: (.*))?$/)
         if (!m) return
         sub = m[1]
-        if (/^(os|cpu|libc)$/.test(m[1])) cur.platform = true
+        if (/^[|>][+-]?\d*$/.test(m[2]?.trim() ?? '')) scalarOf = 4
+        if (/^(os|cpu|libc)$/.test(m[1])) cur.lists[m[1]] = m[2]?.trim() ? flowList(m[2]) : null
         if (m[1] === 'resolution') cur.resolution = m[2] ?? ''
         if (m[1] === 'requiresBuild') cur.requiresBuild = m[2]?.trim() === 'true'
-      } else if (/^ {6}\S/.test(l) && /^(dependencies|optionalDependencies)$/.test(sub)) {
-        const m = l.match(/^ {6}('(?:[^']|'')*'|"(?:[^"\\]|\\.)*"|[^\s:]+):/)
-        if (m) cur.deps.push(unquote(m[1]))
+        if (m[1] === 'optional') cur.optional = m[2]?.trim() === 'true'
+        if (m[1] === 'dev') cur.dev = m[2]?.trim() === 'true'
+      } else if (indent === 6 && /^ {6}- /.test(l) && /^(os|cpu|libc)$/.test(sub)) {
+        const prev = cur.lists[sub]
+        cur.lists[sub] = [...(Array.isArray(prev) ? prev : []), unquote(l.slice(8))]
+      } else if (indent === 6 && /^(dependencies|optionalDependencies)$/.test(sub)) {
+        const m = l.match(/^ {6}('(?:[^']|'')*'|"(?:[^"\\]|\\.)*"|[^\s:]+):(?: (.*))?$/)
+        if (m) {
+          cur.deps.push(unquote(m[1]))
+          // An alias ("@scope/a-linux-x64": "@scope/a@1.0.0-linux-x64") is the real package id; otherwise the name stands for it.
+          const target = unquote((m[2] ?? '').replace(/\(.*$/, '').trim())
+          if (sub === 'optionalDependencies') cur.optDeps.push(/^@?[^@\s]+@\S+$/.test(target) ? target : unquote(m[1]))
+        }
       }
       return
     }
     // Importers (or the root of a single-project v6 file): "version: link:../x" is a workspace link.
-    if (/^\s+version:\s*['"]?link:/.test(l)) { if (!links++) linkLine = at(i) }
+    const v = l.match(/^\s+version:\s*(\S.*)$/)
+    if (v && /^\s*['"]?link:/.test(v[1])) { if (!links++) linkLine = at(i) }
+    else if (v) registryRefs++
   })
+  if (bad) return [...issues, ...unreadable(c, 'pnpm-lock.yaml', `Line ${bad} is not in the layout pnpm writes (entry keys indented by 2 spaces, their fields by 4, spaces only), so the packages cannot be read.`, bad)]
+  const count = sections.packages.length + sections.snapshots.length
+  if (!count) {
+    if (registryRefs) return [...issues, ...unreadable(c, 'pnpm-lock.yaml', `The file lists ${registryRefs} dependencies but has no entries under "packages", so it looks truncated or damaged.`, doc.start + 1)]
+    // A project without dependencies is valid, but it still has a body: an importers section (9.x), or settings and so on (6.x).
+    if (v9 ? !tops.has('importers') : ![...tops].some(t => t !== 'lockfileVersion')) return [...issues, ...unreadable(c, 'pnpm-lock.yaml', `The file has a lockfileVersion line${v9 ? ' but no "importers" section' : ' and nothing else'}, so it looks truncated or damaged. A lockfile for a project without dependencies still has a body.`, doc.start + 1)]
+  }
 
   // v9 keeps dependencies in snapshots, keyed by the package id plus peer suffixes.
   const hinted = new Set<string>()
   for (const s of sections.snapshots) if (s.deps.some(d => NATIVE_HINT.test(d))) hinted.add(s.key.replace(/\(.*$/, ''))
+  // Only optional when every snapshot of the package is ("optional: true").
+  const snapOptional = new Map<string, boolean>()
+  for (const s of sections.snapshots) { const id = s.key.replace(/\(.*$/, ''); snapOptional.set(id, (snapOptional.get(id) ?? true) && s.optional === true) }
 
   const scan = newScan()
   scan.local = { count: links, line: linkLine }
+  for (const e of [...sections.packages, ...sections.snapshots]) if (e.optDeps.length) scan.groups.push(e.optDeps)
   for (const e of sections.packages) {
     let key = e.key.replace(/\(.*$/, '')
     if (v6) {
@@ -802,11 +1024,18 @@ export function parsePnpmLock(c: Ctx, text: string): FileIssue[] {
     const { name, range: ver } = splitSpec(key)
     if (/^(file|link):/.test(ver) || /type:\s*directory/.test(e.resolution)) { addLocal(scan, e.line); continue }
     if (!SEMVER.test(ver) || /type:\s*(git|binary)|gitHosted/.test(e.resolution)) { scan.remote.push({ name, spec: ver, line: e.line }); continue }
-    if (e.platform) continue // os/cpu/libc-specific packages (fsevents, @esbuild/*) are picked per platform.
+    if (Object.keys(e.lists).length) {
+      // os/cpu/libc-restricted packages (fsevents, @esbuild/*) are picked per platform: judged by platformFindings.
+      const lists = e.lists
+      const readable = Object.values(lists).every(v => v !== null)
+      const optional = v6 ? e.optional === true : snapOptional.get(key)
+      scan.platform.push({ name, version: ver, line: e.line, ids: [name, `${name}@${ver}`], test: readable ? testFromLists(lists as PlatLists) : null, spec: describeLists(lists as PlatLists), optional, dev: v6 && e.dev === true && !optional })
+      continue
+    }
     // Only pnpm 8 (6.x) writes requiresBuild, and only when true. Its absence is not proof of "no install script".
     scan.pkgs.push({ name, version: ver, line: e.line, installScript: e.requiresBuild, hint: hinted.has(key) || e.deps.some(d => NATIVE_HINT.test(d)) })
   }
-  return [...issues, ...finishNodeLock(c, scan, 'pnpm-lock.yaml')]
+  return [...issues, ...finishNodeLock(c, scan, 'pnpm-lock.yaml', libc)]
 }
 
 // ---------- Whole-repo analysis ----------
@@ -868,11 +1097,13 @@ export function analyze(files: RepoFile[]): Analysis {
         r.workloads.forEach(n => svc(n.toLowerCase(), f.path))
       } else {
         const libc = libcByService.get(service) ?? 'glibc'
+        // Without a Dockerfile in the service the libc of the node packages is not known: both are considered.
+        const nodeLibc = libcByService.get(service)
         issues = kind === 'requirements' ? parseRequirements(c, f.text, libc)
           : kind === 'poetry' ? parsePoetry(c, f.text, libc)
-          : kind === 'package-lock' ? parsePackageLock(c, f.text)
-          : kind === 'yarn-lock' ? parseYarnLock(c, f.text)
-          : kind === 'pnpm-lock' ? parsePnpmLock(c, f.text)
+          : kind === 'package-lock' ? parsePackageLock(c, f.text, nodeLibc)
+          : kind === 'yarn-lock' ? parseYarnLock(c, f.text, nodeLibc)
+          : kind === 'pnpm-lock' ? parsePnpmLock(c, f.text, nodeLibc)
           : kind === 'go-mod' ? parseGoMod(c, f.text)
           : kind === 'pom' ? parsePom(c, f.text)
           : kind === 'gradle' ? parseGradle(c, f.text)

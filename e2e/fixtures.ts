@@ -9,7 +9,7 @@ const MULTI = [{ os: 'linux', architecture: 'amd64' }, { os: 'linux', architectu
 const X86_ONLY = [{ os: 'linux', architecture: 'amd64' }]
 
 /** Calls the stubs saw, so a test can assert that a lookup was (or was not) made. */
-export interface Calls { images: string[]; pypi: string[]; npm: string[]; prices: string[] }
+export interface Calls { images: string[]; pypi: string[]; npm: string[]; /** name@version, as asked. */ npmVersions: string[]; prices: string[] }
 
 async function stub(page: Page, calls: Calls, violations: string[]) {
   await page.route(() => true, route => {
@@ -35,9 +35,14 @@ async function stub(page: Page, calls: Calls, violations: string[]) {
       return json(route, { info: { version: '1.0' }, urls: files })
     }
     if (url.hostname === 'registry.npmjs.org') {
-      const name = decodeURIComponent(url.pathname.slice(1).split('/').slice(0, -1).join('/'))
+      const parts = url.pathname.slice(1).split('/')
+      const name = decodeURIComponent(parts.slice(0, -1).join('/'))
+      const version = parts[parts.length - 1]
       calls.npm.push(name)
-      return json(route, { name, version: '1.0.0', scripts: { install: 'node-gyp rebuild' }, gypfile: true })
+      calls.npmVersions.push(`${name}@${version}`)
+      // nan and node-addon-api compile with node-gyp; every other package has no install script.
+      if (name === 'nan' || name === 'node-addon-api' || name === 'better-sqlite3') return json(route, { name, version, scripts: { install: 'node-gyp rebuild' }, gypfile: true })
+      return json(route, { name, version })
     }
     // Web fonts: answered with an empty stylesheet so the page renders in its fallback fonts, offline.
     if (url.hostname === 'fonts.googleapis.com') return route.fulfill({ status: 200, contentType: 'text/css', body: '' })
@@ -49,7 +54,7 @@ async function stub(page: Page, calls: Calls, violations: string[]) {
 }
 
 export const test = base.extend<{ calls: Calls; violations: string[]; pageErrors: Error[] }>({
-  calls: async ({}, use) => { await use({ images: [], pypi: [], npm: [], prices: [] }) },
+  calls: async ({}, use) => { await use({ images: [], pypi: [], npm: [], npmVersions: [], prices: [] }) },
   violations: async ({}, use) => { await use([]) },
   pageErrors: async ({}, use) => { await use([]) },
   page: async ({ page, calls, violations, pageErrors }, use) => {

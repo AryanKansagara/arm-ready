@@ -10,7 +10,7 @@ Platform teams moving EKS workloads from x86 (c5a, m5) to Graviton (c7g, c8g) ke
 
 ## Features
 
-- Import Dockerfiles, docker-compose, rendered Helm/K8s YAML, requirements.txt, poetry.lock, package-lock.json, go.mod, pom.xml, Gradle lists, Cargo.lock and an instance inventory CSV, with format detection, column mapping and a line-numbered validation report.
+- Import Dockerfiles, docker-compose, rendered Helm/K8s YAML, requirements.txt, poetry.lock, package-lock.json, yarn.lock (Yarn 1 and 2+), pnpm-lock.yaml (v9 and v6), go.mod, pom.xml, Gradle lists, Cargo.lock and an instance inventory CSV, with format detection, column mapping and a line-numbered validation report.
 - Dockerfile parser: multi-stage FROM, ARG defaults, `--platform`, hard-coded amd64 downloads, `GOARCH`, `[arch=amd64]` apt sources, x86 library paths and compiler flags, apt/apk packages.
 - Live checks: registry manifest lists (Docker Hub, GHCR, Quay, MCR, GCR and other public registries via a small `/api/manifest` function), PyPI wheel tags (glibc vs musl), npm install-script metadata. Curated notes for cgo, JNI and Rust `-sys` crates.
 - Per-service readiness score, worklist with status tracking and CSV export, printable report.
@@ -22,13 +22,13 @@ Platform teams moving EKS workloads from x86 (c5a, m5) to Graviton (c7g, c8g) ke
 
 ## Tested against real files
 
-The parsers are regression-tested with excerpts from public repos (`src/engine/real.test.ts`): GoogleCloudPlatform/microservices-demo (Dockerfiles, go.mod, package-lock.json, requirements.txt, build.gradle, Kubernetes manifests), apache/superset (Dockerfile, Compose), getsentry/self-hosted (Compose with anchors), puppeteer (Dockerfile), BurntSushi/ripgrep (Cargo.lock), spring-petclinic (pom.xml), python-poetry (poetry.lock) and the Argo CD install manifest.
+The parsers are regression-tested with excerpts from public repos (`src/engine/real.test.ts`): GoogleCloudPlatform/microservices-demo (Dockerfiles, go.mod, package-lock.json, requirements.txt, build.gradle, Kubernetes manifests), apache/superset (Dockerfile, Compose), getsentry/self-hosted (Compose with anchors), puppeteer (Dockerfile), BurntSushi/ripgrep (Cargo.lock), spring-petclinic (pom.xml), python-poetry (poetry.lock) and the Argo CD install manifest. Yarn and pnpm lockfiles (`src/engine/lockfiles.test.ts`) use excerpts of facebook/react, firebase-js-sdk, babel, yarnpkg/berry (lockfile versions 4, 6, 8 and 10), vitejs/vite (pnpm 6 and 9, including a two-document file) and withastro/astro; the sources and commits are named at the top of that file.
 
 Prices come from the JSON behind https://aws.amazon.com/ec2/pricing/on-demand/. Refresh the bundled us-east-1 table with `node scripts/refresh-prices.mjs`.
 
 ## Known gaps
 
-- yarn.lock and pnpm-lock.yaml are not parsed; generate a package-lock.json for the scan.
+- yarn.lock (Yarn 1, and Yarn 2+ metadata versions 4 to 10) and pnpm-lock.yaml (lockfileVersion 9.x and 6.x) do not record install scripts, so at most 100 packages per scan are looked up on npm (packages that depend on a native-build helper first) and the rest are reported as not checked, never as pure JavaScript. Other lockfile versions are an error. Git, tarball and other non-registry entries are listed as unknown; workspace, link, portal and file entries are skipped. `bun.lock` is not read, and versions are never resolved from `package.json` ranges.
 - Helm charts must be rendered first; Compose images that are only a variable need the value filled in.
 - Private registries are not queried from the browser; use the generated `docker manifest inspect` script and import its output.
 - Only general purpose, compute, memory and burstable x86 families are mapped to Graviton automatically; other families need the Arm type entered per row.

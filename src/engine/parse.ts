@@ -9,6 +9,8 @@ export function detectKind(path: string, text: string): FileKind {
   if (/^(docker-)?compose[\w.-]*\.ya?ml$/.test(base)) return 'compose'
   if (base === 'poetry.lock') return 'poetry'
   if (base === 'package-lock.json' || base === 'npm-shrinkwrap.json') return 'package-lock'
+  if (base === 'yarn.lock') return 'yarn-lock'
+  if (base === 'pnpm-lock.yaml') return 'pnpm-lock'
   if (base === 'go.mod') return 'go-mod'
   if (base === 'pom.xml') return 'pom'
   if (base === 'cargo.lock') return 'cargo'
@@ -30,13 +32,15 @@ export function detectKind(path: string, text: string): FileKind {
   if (/^\[\[package\]\]/m.test(t) && /^checksum = /m.test(t)) return 'cargo'
   if (/^\[\[package\]\]/m.test(t)) return 'poetry'
   if (t.startsWith('{') && /"lockfileVersion"/.test(t.slice(0, 500))) return 'package-lock'
+  if (/^# yarn lockfile v\d+/m.test(t) || (/^__metadata:/m.test(t) && /^\s+cacheKey:/m.test(t))) return 'yarn-lock'
+  if (/^["']?lockfileVersion["']?:\s*["']?\d+\.\d+/m.test(t) && /^(importers|packages|snapshots):/m.test(t)) return 'pnpm-lock'
   if (/^[A-Za-z0-9_.-]+\s*(==|>=|~=)/m.test(t)) return 'requirements'
   return 'unknown'
 }
 
 export const KIND_LABEL: Record<FileKind, string> = {
   dockerfile: 'Dockerfile', compose: 'Docker Compose', k8s: 'Kubernetes manifest', requirements: 'requirements.txt', poetry: 'poetry.lock',
-  'package-lock': 'package-lock.json', 'go-mod': 'go.mod', pom: 'pom.xml', gradle: 'Gradle dependencies', cargo: 'Cargo.lock',
+  'package-lock': 'package-lock.json', 'yarn-lock': 'yarn.lock', 'pnpm-lock': 'pnpm-lock.yaml', 'go-mod': 'go.mod', pom: 'pom.xml', gradle: 'Gradle dependencies', cargo: 'Cargo.lock',
   inventory: 'Instance inventory', manifests: 'docker manifest inspect export', unknown: 'Not recognised',
 }
 
@@ -534,6 +538,277 @@ export function parseCargo(c: Ctx, text: string): FileIssue[] {
   return []
 }
 
+// ---------- yarn.lock and pnpm-lock.yaml ----------
+//
+// Formats, from the package managers' own source and docs:
+//   Yarn 1:  yarnpkg/yarn src/lockfile/stringify.js + parse.js ("# yarn lockfile v1", `name@range` keys, 2-space fields).
+//   Yarn 2+: yarnpkg/berry packages/yarnpkg-core/sources/Project.ts (`__metadata.version`, `resolution: "ident@protocol:ref"`).
+//   pnpm:    pnpm/pnpm docs/lockfile-format.md and pnpm/spec lockfile/{6.0,9.0}.md.
+// None of them records whether a package runs an install script, except pnpm 8 (lockfileVersion 6.x) `requiresBuild: true`.
+
+/** Most live npm lookups a scan starts for packages whose install scripts a lockfile does not record (shared by all lockfiles in the scan). */
+export const NPM_LOOKUP_LIMIT = 100
+
+/** A dependency of a package that is a strong sign the package builds or loads native code. */
+const NATIVE_HINT = /^(node-gyp|node-gyp-build|node-pre-gyp|@mapbox\/node-pre-gyp|prebuild-install|prebuildify|node-addon-api|nan|bindings|cmake-js|napi-macros)$/
+
+interface NodePkg { name: string; version: string; line: number; installScript?: boolean; hint?: boolean }
+interface NodeScan {
+  pkgs: NodePkg[]
+  /** workspace, link, portal and file entries: the project's own code. */
+  local: { count: number; line: number }
+  /** git, tarball URL and other non-registry entries. */
+  remote: { name: string; version?: string; spec: string; line: number }[]
+}
+
+const newScan = (): NodeScan => ({ pkgs: [], local: { count: 0, line: 0 }, remote: [] })
+const addLocal = (s: NodeScan, line: number) => { if (!s.local.count++) s.local.line = line }
+
+/** An unreadable or unsupported lockfile is an error AND an unknown finding, so the service never looks ready. */
+function unreadable(c: Ctx, label: string, message: string, line = 1): FileIssue[] {
+  add(c, { ecosystem: 'npm', name: label, key: `unreadable|${c.file}`, line, status: 'unknown', title: 'Lockfile could not be read', detail: message, fix: 'Regenerate the lockfile with a current package manager and import it again.', effort: 'S' })
+  return [{ line, level: 'error', message }]
+}
+
+/** Turns scanned packages into findings. Shared by yarn.lock and pnpm-lock.yaml. */
+function finishNodeLock(c: Ctx, scan: NodeScan, label: string): FileIssue[] {
+  const issues: FileIssue[] = []
+  const seen = new Map<string, NodePkg>()
+  for (const p of scan.pkgs) {
+    const prev = seen.get(`${p.name}@${p.version}`)
+    if (!prev) seen.set(`${p.name}@${p.version}`, { ...p })
+    else { prev.installScript ||= p.installScript; prev.hint ||= p.hint }
+  }
+  const versions = new Map<string, number>()
+  for (const p of seen.values()) versions.set(p.name, (versions.get(p.name) ?? 0) + 1)
+  // Findings are keyed by name, or name@version when the lockfile holds several versions of it.
+  const key = (p: NodePkg) => (versions.get(p.name)! > 1 ? `${p.name}@${p.version}` : p.name)
+
+  let budget = Math.max(0, NPM_LOOKUP_LIMIT - c.out.filter(f => f.lookup === 'npm' && f.status === 'pending').length)
+  const unchecked: NodePkg[] = []
+  // Known install scripts first, then packages that depend on a native-build helper, then file order.
+  const rank = (p: NodePkg) => (p.installScript ? 0 : p.hint ? 1 : 2)
+  const ordered = [...seen.values()].map((p, i) => ({ p, i })).sort((a, b) => rank(a.p) - rank(b.p) || a.i - b.i).map(x => x.p)
+  for (const p of ordered) {
+    const known = NPM[p.name]
+    if (known) add(c, { ecosystem: 'npm', name: p.name, key: key(p), version: p.version, line: p.line, status: known.status, title: known.title, detail: known.detail, fix: known.fix, effort: known.effort ?? 'S', source: 'curated' })
+    else if (budget > 0) { budget--; add(c, { ecosystem: 'npm', name: p.name, key: key(p), version: p.version, line: p.line, status: 'pending', lookup: 'npm', title: 'Checking npm for a native addon', detail: '', effort: 'S' }) }
+    else unchecked.push(p)
+  }
+  if (unchecked.length) {
+    unchecked.sort((a, b) => a.line - b.line)
+    const msg = `${label} does not record install scripts. ${unchecked.length} of ${seen.size} packages were not looked up on npm (limit ${NPM_LOOKUP_LIMIT} npm lookups per scan), so they are not counted as pure JavaScript.`
+    add(c, { ecosystem: 'npm', name: `${unchecked.length} packages`, key: `unchecked|${c.file}`, line: unchecked[0].line, status: 'unknown', title: 'Install scripts not checked', detail: msg, fix: 'Check these for node-gyp, prebuild or binding.gyp. Or import a package-lock.json made with npm install --package-lock-only (versions can differ from this lockfile): npm records install scripts there.', effort: 'M' })
+    issues.push({ line: unchecked[0].line, level: 'warn', message: msg })
+  }
+  if (scan.local.count) issues.push({ line: scan.local.line, level: 'info', message: `${scan.local.count} local entries (workspace, link, portal or file) are your own code, not installed from npm, and are not scanned.` })
+  for (const r of scan.remote) {
+    add(c, { ecosystem: 'npm', name: r.name, key: `${r.name}@${r.spec}`, version: r.version, line: r.line, status: 'unknown', title: 'Not installed from the npm registry', detail: `Installed from ${r.spec}. A lockfile entry like this has no install-script data and npm cannot be asked about it.`, fix: 'Look in that repository or archive for node-gyp, prebuild or binding.gyp, and build it on arm64.', effort: 'M' })
+    issues.push({ line: r.line, level: 'warn', message: `${r.name} comes from ${r.spec}, not the npm registry, so it cannot be checked.` })
+  }
+  if (!scan.pkgs.length && !scan.remote.length) issues.push({ line: 1, level: 'info', message: 'No packages from the npm registry in this lockfile.' })
+  return issues
+}
+
+const unquote = (s: string) => {
+  const t = s.trim()
+  if (t.length > 1 && t.startsWith('"') && t.endsWith('"')) { try { return JSON.parse(t) as string } catch { return t.slice(1, -1) } }
+  if (t.length > 1 && t.startsWith("'") && t.endsWith("'")) return t.slice(1, -1).replace(/''/g, "'")
+  return t
+}
+
+/** `name@range` split on the first @ after position 0, so @scope/name works. */
+function splitSpec(spec: string): { name: string; range: string } {
+  const at = spec.indexOf('@', 1)
+  return at < 0 ? { name: spec, range: '' } : { name: spec.slice(0, at), range: spec.slice(at + 1) }
+}
+
+/** Yarn 1 range kinds. A registry range is a semver range, a tag, or npm:alias@range. */
+function yarnRangeKind(range: string): 'registry' | 'local' | 'remote' {
+  if (/^(link|file|portal|workspace):/.test(range)) return 'local'
+  if (/^npm:/.test(range)) return 'registry'
+  if (/^(git|github|gitlab|bitbucket|https?|ssh):|^git[+@]|^[\w.-]+\/[\w.-]+(#.*)?$/.test(range)) return 'remote'
+  return 'registry'
+}
+
+function splitYarn1Keys(raw: string): string[] {
+  return (raw.match(/"(?:[^"\\]|\\.)*"|[^,\s][^,]*/g) ?? []).map(k => unquote(k.trim()))
+}
+
+export function parseYarnClassic(c: Ctx, text: string): FileIssue[] {
+  const L = text.split(/\r?\n/)
+  const scan = newScan()
+  for (let i = 0; i < L.length; i++) {
+    const l = L[i]
+    if (!l || l[0] === ' ' || l[0] === '#' || !l.endsWith(':')) continue
+    const start = i
+    const keys = splitYarn1Keys(l.slice(0, -1))
+    let version = '', section = ''
+    const deps: string[] = []
+    for (i++; i < L.length && (L[i] === '' || L[i][0] === ' '); i++) {
+      const f = L[i]
+      if (/^ {4}\S/.test(f)) { if (/^(dependencies|optionalDependencies)$/.test(section)) deps.push(unquote(f.trim().match(/^"(?:[^"\\]|\\.)*"|^\S+/)![0])); continue }
+      const m = f.match(/^ {2}(\w+):?(?: (.*))?$/)
+      if (!m) continue
+      section = m[1]
+      if (m[1] === 'version') version = unquote(m[2] ?? '')
+    }
+    i--
+    if (!keys.length || !version) continue
+    const line = start + 1
+    let { name, range } = splitSpec(keys[0])
+    const kind = yarnRangeKind(range)
+    if (kind === 'local') addLocal(scan, line)
+    else if (kind === 'remote') scan.remote.push({ name, version, spec: range.replace(/#.*$/, ''), line })
+    else {
+      // "alias@npm:real@^1": the real package is what gets installed.
+      if (range.startsWith('npm:')) name = splitSpec(range.slice(4)).name
+      scan.pkgs.push({ name, version, line, hint: deps.some(d => NATIVE_HINT.test(d)) })
+    }
+  }
+  return finishNodeLock(c, scan, 'yarn.lock')
+}
+
+/** `__metadata.version` values read: Yarn 2.4 (4) up to LOCKFILE_VERSION in Project.ts on master (10). */
+const BERRY_VERSIONS = [4, 10] as const
+
+export function parseYarnBerry(c: Ctx, text: string): FileIssue[] {
+  const L = text.split(/\r?\n/)
+  const metaAt = L.findIndex(l => /^__metadata:/.test(l))
+  let version = 0
+  for (let i = metaAt + 1; i < L.length && (L[i] === '' || L[i][0] === ' '); i++) {
+    const m = L[i].match(/^\s+version:\s*"?(\d+)"?\s*$/)
+    if (m) version = Number(m[1])
+  }
+  const [lo, hi] = BERRY_VERSIONS
+  if (!version) return unreadable(c, 'yarn.lock', 'The __metadata block has no version, so the yarn.lock layout is unknown.', metaAt + 1)
+  if (version < lo || version > hi) return unreadable(c, 'yarn.lock', `yarn.lock __metadata version ${version} is not supported. This tool reads versions ${lo} to ${hi}. Run yarn install with a current Yarn to rewrite it.`, metaAt + 1)
+  const scan = newScan()
+  for (let i = 0; i < L.length; i++) {
+    const l = L[i]
+    if (!l || l[0] === ' ' || l[0] === '#' || !l.endsWith(':') || /^__metadata:/.test(l)) continue
+    const start = i
+    let resolution = '', ver = '', conditions = '', section = ''
+    const deps: string[] = []
+    for (i++; i < L.length && (L[i] === '' || L[i][0] === ' '); i++) {
+      const f = L[i]
+      if (/^ {4}\S/.test(f)) { if (section === 'dependencies') deps.push(unquote(f.trim().match(/^"(?:[^"\\]|\\.)*"|^[^\s:]+/)![0])); continue }
+      const m = f.match(/^ {2}(\w+):(?: (.*))?$/)
+      if (!m) continue
+      section = m[1]
+      if (m[1] === 'resolution') resolution = unquote(m[2] ?? '')
+      if (m[1] === 'version') ver = unquote(m[2] ?? '')
+      if (m[1] === 'conditions') conditions = m[2] ?? ''
+    }
+    i--
+    if (!resolution) continue
+    const line = start + 1
+    // The resolution is the real identity, even for aliases: "string-width-cjs@npm:string-width@^4" resolves to "string-width@npm:4.2.3".
+    const { name, range: ref } = splitSpec(resolution)
+    if (/^patch:/.test(ref)) continue // A patched copy of an entry that is listed on its own.
+    if (/^(workspace|link|portal|file):/.test(ref)) addLocal(scan, line)
+    else if (/^npm:/.test(ref)) {
+      if (conditions) continue // os/cpu-conditional packages are picked per platform by Yarn.
+      scan.pkgs.push({ name, version: ver || ref.slice(4).split('::')[0], line, hint: deps.some(d => NATIVE_HINT.test(d)) })
+    } else scan.remote.push({ name, version: ver || undefined, spec: ref.replace(/#.*$/, ''), line })
+  }
+  return finishNodeLock(c, scan, 'yarn.lock')
+}
+
+export function parseYarnLock(c: Ctx, text: string): FileIssue[] {
+  if (/^__metadata:/m.test(text)) return parseYarnBerry(c, text)
+  const v = text.match(/^# yarn lockfile v(\d+)/m)
+  if (v) return v[1] === '1' ? parseYarnClassic(c, text) : unreadable(c, 'yarn.lock', `"# yarn lockfile v${v[1]}" is not a yarn.lock format this tool reads (Yarn 1 writes v1, Yarn 2 and later write a __metadata block).`)
+  return unreadable(c, 'yarn.lock', 'Not a recognised yarn.lock: expected "# yarn lockfile v1" (Yarn 1) or a "__metadata:" block (Yarn 2 and later).')
+}
+
+/** One entry key of a pnpm packages/snapshots section: 2-space indent, quoted or not (unquoted keys can contain colons, e.g. name@file:path). */
+function pnpmKey(l: string): string | null {
+  let m = l.match(/^ {2}'((?:[^']|'')*)':(?: .*)?$/)
+  if (m) return m[1].replace(/''/g, "'")
+  m = l.match(/^ {2}("(?:[^"\\]|\\.)*"):(?: .*)?$/)
+  if (m) return unquote(m[1])
+  m = l.match(/^ {2}([^\s'"#].*?):(?: \{\})?$/)
+  return m ? m[1] : null
+}
+
+const SEMVER = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]*)?$/
+
+export function parsePnpmLock(c: Ctx, text: string): FileIssue[] {
+  const all = text.split(/\r?\n/)
+  // pnpm can put an environment (config dependencies) document first and the project lockfile last, split by "---".
+  const docs: { start: number; end: number }[] = []
+  let from = 0
+  all.forEach((l, i) => { if (/^---\s*$/.test(l)) { docs.push({ start: from, end: i }); from = i + 1 } })
+  docs.push({ start: from, end: all.length })
+  const live = docs.filter(d => all.slice(d.start, d.end).some(l => l.trim() && !l.trim().startsWith('#')))
+  if (!live.length) return unreadable(c, 'pnpm-lock.yaml', 'The file is empty.')
+  const doc = live[live.length - 1]
+  const L = all.slice(doc.start, doc.end)
+  const at = (i: number) => doc.start + i + 1
+  const issues: FileIssue[] = []
+  if (live.length > 1) issues.push({ line: live[0].start + 1, level: 'info', message: `Skipped ${live.length - 1} environment document${live.length > 2 ? 's' : ''} before line ${doc.start + 1}; the project lockfile is the last document.` })
+
+  const vm = L.join('\n').match(/^[ \t]*["']?lockfileVersion["']?[ \t]*:[ \t]*["']?([\d.]+)["']?/m)
+  if (!vm) return unreadable(c, 'pnpm-lock.yaml', 'No lockfileVersion found, so the pnpm-lock.yaml layout is unknown.', doc.start + 1)
+  const lv = vm[1]
+  const v9 = /^9\./.test(lv), v6 = /^6\./.test(lv)
+  if (!v9 && !v6) {
+    const old = /^[1-5]\./.test(lv)
+    return unreadable(c, 'pnpm-lock.yaml', `pnpm-lock.yaml lockfileVersion ${lv} is not supported. This tool reads 9.x (pnpm 9 and later) and 6.x (pnpm 8). ${old ? 'Versions 5.x and older were written by pnpm 7 and earlier.' : 'This is a newer or experimental format.'} Regenerate it with a current pnpm using its default lockfile format.`, at(L.findIndex(l => /lockfileVersion/.test(l))))
+  }
+
+  interface Entry { key: string; line: number; platform: boolean; resolution: string; requiresBuild: boolean; deps: string[] }
+  const sections: Record<string, Entry[]> = { packages: [], snapshots: [] }
+  let section = '', cur: Entry | null = null, sub = ''
+  let links = 0, linkLine = 0
+  L.forEach((l, i) => {
+    const top = l.match(/^(\w+):/)
+    if (top) { section = top[1]; cur = null; sub = ''; return }
+    if (section === 'packages' || section === 'snapshots') {
+      const k = pnpmKey(l)
+      if (k !== null) { cur = { key: k, line: at(i), platform: false, resolution: '', requiresBuild: false, deps: [] }; sections[section].push(cur); sub = ''; return }
+      if (!cur) return
+      if (/^ {4}\S/.test(l)) {
+        const m = l.match(/^ {4}(\w+):(?: (.*))?$/)
+        if (!m) return
+        sub = m[1]
+        if (/^(os|cpu|libc)$/.test(m[1])) cur.platform = true
+        if (m[1] === 'resolution') cur.resolution = m[2] ?? ''
+        if (m[1] === 'requiresBuild') cur.requiresBuild = m[2]?.trim() === 'true'
+      } else if (/^ {6}\S/.test(l) && /^(dependencies|optionalDependencies)$/.test(sub)) {
+        const m = l.match(/^ {6}('(?:[^']|'')*'|"(?:[^"\\]|\\.)*"|[^\s:]+):/)
+        if (m) cur.deps.push(unquote(m[1]))
+      }
+      return
+    }
+    // Importers (or the root of a single-project v6 file): "version: link:../x" is a workspace link.
+    if (/^\s+version:\s*['"]?link:/.test(l)) { if (!links++) linkLine = at(i) }
+  })
+
+  // v9 keeps dependencies in snapshots, keyed by the package id plus peer suffixes.
+  const hinted = new Set<string>()
+  for (const s of sections.snapshots) if (s.deps.some(d => NATIVE_HINT.test(d))) hinted.add(s.key.replace(/\(.*$/, ''))
+
+  const scan = newScan()
+  scan.local = { count: links, line: linkLine }
+  for (const e of sections.packages) {
+    let key = e.key.replace(/\(.*$/, '')
+    if (v6) {
+      // v6 ids start with "/"; ids without it name another registry or a git host (host/user/repo/sha).
+      if (!key.startsWith('/')) { scan.remote.push({ name: key, spec: key, line: e.line }); continue }
+      key = key.slice(1)
+    }
+    const { name, range: ver } = splitSpec(key)
+    if (/^(file|link):/.test(ver) || /type:\s*directory/.test(e.resolution)) { addLocal(scan, e.line); continue }
+    if (!SEMVER.test(ver) || /type:\s*(git|binary)|gitHosted/.test(e.resolution)) { scan.remote.push({ name, spec: ver, line: e.line }); continue }
+    if (e.platform) continue // os/cpu/libc-specific packages (fsevents, @esbuild/*) are picked per platform.
+    // Only pnpm 8 (6.x) writes requiresBuild, and only when true. Its absence is not proof of "no install script".
+    scan.pkgs.push({ name, version: ver, line: e.line, installScript: e.requiresBuild, hint: hinted.has(key) || e.deps.some(d => NATIVE_HINT.test(d)) })
+  }
+  return [...issues, ...finishNodeLock(c, scan, 'pnpm-lock.yaml')]
+}
+
 // ---------- Whole-repo analysis ----------
 
 const GROUP_DIRS = /^(services|apps|cmd|packages|src|svc|components|deploy|deployments?|docker|dockerfiles|main|java|build|k8s|kubernetes|manifests|helm|charts?|ci|release)$/i
@@ -567,7 +842,7 @@ export function analyze(files: RepoFile[]): Analysis {
     for (let d = dirOf(path); d; d = dirOf(d)) if (dockerDirs.has(d)) return dockerDirs.get(d)!
     return serviceOf(path)
   }
-  const order: FileKind[] = ['dockerfile', 'requirements', 'poetry', 'package-lock', 'go-mod', 'pom', 'gradle', 'cargo', 'compose', 'k8s']
+  const order: FileKind[] = ['dockerfile', 'requirements', 'poetry', 'package-lock', 'yarn-lock', 'pnpm-lock', 'go-mod', 'pom', 'gradle', 'cargo', 'compose', 'k8s']
   for (const kind of order) {
     for (const { f } of kinds.filter(k => k.kind === kind)) {
       const lines = f.text.split('\n').length
@@ -596,12 +871,14 @@ export function analyze(files: RepoFile[]): Analysis {
         issues = kind === 'requirements' ? parseRequirements(c, f.text, libc)
           : kind === 'poetry' ? parsePoetry(c, f.text, libc)
           : kind === 'package-lock' ? parsePackageLock(c, f.text)
+          : kind === 'yarn-lock' ? parseYarnLock(c, f.text)
+          : kind === 'pnpm-lock' ? parsePnpmLock(c, f.text)
           : kind === 'go-mod' ? parseGoMod(c, f.text)
           : kind === 'pom' ? parsePom(c, f.text)
           : kind === 'gradle' ? parseGradle(c, f.text)
           : parseCargo(c, f.text)
         const s = svc(service, f.path)
-        s.language = s.language ?? ({ requirements: 'Python', poetry: 'Python', 'package-lock': 'Node.js', 'go-mod': 'Go', pom: 'Java', gradle: 'Java', cargo: 'Rust' } as Record<string, string>)[kind]
+        s.language = s.language ?? ({ requirements: 'Python', poetry: 'Python', 'package-lock': 'Node.js', 'yarn-lock': 'Node.js', 'pnpm-lock': 'Node.js', 'go-mod': 'Go', pom: 'Java', gradle: 'Java', cargo: 'Rust' } as Record<string, string>)[kind]
       }
       // Findings from compose/k8s carry their own service names.
       for (const fd of findings.slice(before)) fd.service = fd.service.toLowerCase()

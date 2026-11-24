@@ -53,7 +53,7 @@ export default function Files({ project: p, files, onScan }: { project: Project;
         <label className={`drop${over ? ' over' : ''}`} onDragOver={e => { e.preventDefault(); setOver(true) }} onDragLeave={() => setOver(false)} onDrop={e => { e.preventDefault(); setOver(false); void stage(e.dataTransfer.files) }}>
           <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><path d="M12 16V4m0 0-4 4m4-4 4 4M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3" /></svg>
           <strong>Drop files here or click to choose</strong>
-          <span className="muted small">Dockerfile · docker-compose.yml · K8s/Helm YAML · requirements.txt · poetry.lock · package-lock.json · go.mod · pom.xml · Gradle list · Cargo.lock · instance CSV · manifest export (.jsonl)</span>
+          <span className="muted small">Dockerfile · docker-compose.yml · K8s/Helm YAML · requirements.txt · poetry.lock · package-lock.json · yarn.lock · pnpm-lock.yaml · go.mod · pom.xml · Gradle list · Cargo.lock · instance CSV · manifest export (.jsonl)</span>
           <input ref={input} type="file" multiple className="sr-only" onChange={e => { if (e.target.files) void stage(e.target.files); e.target.value = '' }} />
         </label>
         <div className="row gap-sm wrap">

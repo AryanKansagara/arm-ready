@@ -1,0 +1,18 @@
+---
+lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    configDependencies: {}
+    packageManagerDependencies:
+      pnpm:
+        specifier: 12.23.0
+        version: 12.23.0
+
+packages:
+---
+{
+	"lockfileVersion": "13.0",
+
+	"settings": {

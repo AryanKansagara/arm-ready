@@ -98,7 +98,7 @@ export function Landing() {
           <p className="eyebrow">How it works</p>
           <h2>From a pile of build files to a migration plan</h2>
           <ol className="steps">
-            <li><h3>Import</h3><p>Dockerfiles, Compose, rendered Helm/K8s YAML, requirements.txt, poetry.lock, package-lock.json, go.mod, pom.xml, Gradle lists, Cargo.lock. Parsed in your browser.</p></li>
+            <li><h3>Import</h3><p>Dockerfiles, Compose, rendered Helm/K8s YAML, requirements.txt, poetry.lock, package-lock.json, yarn.lock, pnpm-lock.yaml, go.mod, pom.xml, Gradle lists, Cargo.lock. Parsed in your browser.</p></li>
             <li><h3>Check live</h3><p>Manifest lists for every image, PyPI wheel tags for every Python pin, npm metadata for every install script. Curated notes for cgo, JNI and known offenders.</p></li>
             <li><h3>Fix</h3><p>A worklist with file and line, the exact fix and effort. Multi-arch buildx workflow on native arm runners, and nodeSelector patches.</p></li>
             <li><h3>Cost and track</h3><p>Your instance inventory against dated on-demand prices with a performance factor and break-even. Re-scan each sprint and watch the trend.</p></li>

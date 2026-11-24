@@ -1,5 +1,5 @@
 export type FileKind =
-  | 'dockerfile' | 'compose' | 'k8s' | 'requirements' | 'poetry' | 'package-lock'
+  | 'dockerfile' | 'compose' | 'k8s' | 'requirements' | 'poetry' | 'package-lock' | 'yarn-lock' | 'pnpm-lock'
   | 'go-mod' | 'pom' | 'gradle' | 'cargo' | 'inventory' | 'manifests' | 'unknown'
 
 export interface RepoFile { path: string; text: string }
